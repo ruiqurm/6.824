@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"plugin"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +28,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,10 +35,52 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	CallForWork()
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+}
 
+type MapFunction interface {
+}
+
+// 获取一个map或者reduce
+func CallForWork() {
+	args := EmptyRequest{}
+	reply := TaskReply{}
+	ok := call("Coordinator.GetTask", &args, &reply)
+	if !ok {
+		fmt.Println("call failed!")
+		return
+	}
+	print(reply.TaskType)
+	if reply.TaskType == "map" {
+		plug, err := plugin.Open("wc.so")
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		map_function, err := plug.Lookup("Map")
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		filename := reply.FileName
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		println("read file:")
+
+		result := map_function.(func(string, string) []KeyValue)(filename, string(content))
+		for i := range result {
+			println(result[i].Key, result[i].Value)
+		}
+	}
 }
 
 //
