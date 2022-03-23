@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -8,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"plugin"
+	"time"
 )
 
 //
@@ -35,7 +37,10 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	CallForWork()
+	// 首先向master注册
+	id := Register()
+
+	CallForWork(id)
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
@@ -44,17 +49,35 @@ func Worker(mapf func(string, string) []KeyValue,
 type MapFunction interface {
 }
 
+func Register() int {
+	// register the worker with the coordinator
+	args := RegisterArgs{}
+	reply := RegisterReply{}
+	ok := call("Coordinator.Register", &args, &reply)
+	if !ok {
+		fmt.Println("register failed!")
+		os.Exit(1)
+	}
+	return reply.ID
+}
+
 // 获取一个map或者reduce
-func CallForWork() {
-	args := EmptyRequest{}
-	reply := TaskReply{}
-	ok := call("Coordinator.GetTask", &args, &reply)
+func CallForWork(id int) {
+	args := GetWorkArgs{}
+	reply := GetWorkReply{}
+	args.ID = id
+	ok := call("Coordinator.GetWork", &args, &reply)
 	if !ok {
 		fmt.Println("call failed!")
 		return
 	}
-	print(reply.TaskType)
-	if reply.TaskType == "map" {
+	if reply.Type == 0 {
+		// go to sleep
+		fmt.Println("sleep")
+		time.Sleep(time.Duration(1) * time.Second)
+		return
+	}
+	if reply.Type == 1 {
 		plug, err := plugin.Open("wc.so")
 		if err != nil {
 			fmt.Println(err)
@@ -65,7 +88,7 @@ func CallForWork() {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		filename := reply.FileName
+		filename := reply.Filename
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
@@ -74,11 +97,22 @@ func CallForWork() {
 		if err != nil {
 			log.Fatalf("cannot read %v", filename)
 		}
-		println("read file:")
-
-		result := map_function.(func(string, string) []KeyValue)(filename, string(content))
-		for i := range result {
-			println(result[i].Key, result[i].Value)
+		var encoders []*json.Encoder
+		var files []*os.File
+		fmt.Println("sdaasd")
+		for i := 0; i < reply.NReduce; i++ {
+			file, _ := os.Create(fmt.Sprintf("mr-%d-%d", id, i))
+			encoders = append(encoders, json.NewEncoder(file))
+		}
+		// save file in format: mg-job-reduce.txt
+		fmt.Println("sdaasd")
+		for _, obj := range map_function.(func(string, string) []KeyValue)(filename, string(content)) {
+			key := obj.Key
+			encoders[ihash(key)%reply.NReduce].Encode(&obj)
+		}
+		fmt.Println("sdaasd")
+		for _, file := range files {
+			file.Close()
 		}
 	}
 }

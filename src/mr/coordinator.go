@@ -13,32 +13,51 @@ type Coordinator struct {
 	RemainList  []string
 	FileStatus  map[int]int
 	TaskMapping map[int]string // ID -> filename
-	Id_counter  int
+	nReduce     int
+	id_counter  int
+	status      int
 }
 
 // Your code here -- RPC handlers for the worker to call.
-type TaskReply struct {
-	TaskType string // map or reduce
-	FileName string
-	ID       int
-}
+
 type EmptyRequest struct{}
 
-func (c *Coordinator) GetTask(args *EmptyRequest, reply *TaskReply) error {
-	if len(c.RemainList) == 0 {
-		reply.TaskType = "done"
-	} else {
-		reply.TaskType = "map"
-		reply.FileName = c.RemainList[0]
-		c.RemainList = c.RemainList[1:]
-		c.TaskMapping[c.Id_counter] = reply.FileName
-		reply.ID = c.Id_counter
-		c.Id_counter++
+func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
+	reply.ID = c.id_counter
+	c.id_counter++
+	return nil
+}
+
+func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
+	switch c.status {
+	case 0:
+		{
+			reply.Type = 0
+		}
+	case 1:
+		{
+			// map阶段
+			if len(c.RemainList) != 0 {
+				reply.Type = 1
+				reply.NReduce = c.nReduce
+				reply.Filename = c.RemainList[0]
+				c.RemainList = c.RemainList[1:]
+				c.TaskMapping[args.ID] = reply.Filename
+			} else {
+				reply.Type = 0
+			}
+		}
+	case 2:
+		{
+			// reduce阶段
+			reply.Type = 0
+
+		}
+
 	}
 	return nil
 }
 
-//
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
@@ -86,9 +105,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// Your code here.
 	c.RemainList = files
-	c.Id_counter = 0
+	c.id_counter = 0
+	c.nReduce = nReduce
 	c.FileStatus = make(map[int]int)
 	c.TaskMapping = make(map[int]string)
+	c.status = 1
 	c.server()
 	return &c
 }
