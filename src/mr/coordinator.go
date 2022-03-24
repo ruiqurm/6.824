@@ -7,18 +7,19 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync/atomic"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	Files       []string
+	Files       []string // imutable
 	RemainJobs  chan int
-	RunningTask map[string]int
-	nReduce     int
-	nJob        int
-	finished    int
-	id_counter  int
-	status      int
+	RunningTask map[string]int // no used
+	nReduce     int32          // imutable
+	nJob        int32          // imutable
+	finished    int32          // count for finished jobs
+	id_counter  int32          // no used
+	status      atomic.Value
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -26,17 +27,14 @@ type Coordinator struct {
 type EmptyRequest struct{}
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
-	reply.ID = c.id_counter
-	c.id_counter++
+	reply.ID = int(c.id_counter)
+	atomic.AddInt32(&c.id_counter, 1)
 	return nil
 }
 
 func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
-	switch c.status {
-	case 0:
-		{
-			reply.Type = 0
-		}
+	status := c.status.Load()
+	switch status {
 	case 1:
 		{
 			// map阶段
@@ -46,7 +44,7 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 					// 有job可以运行
 					reply.Id = job
 					reply.Type = 1
-					reply.NReduce = c.nReduce
+					reply.NReduce = int(c.nReduce)
 					reply.Filename = c.Files[job]
 				}
 			default:
@@ -63,7 +61,7 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 			case job := <-c.RemainJobs:
 				{
 					reply.Type = 2
-					reply.NReduce = c.nJob
+					reply.NReduce = int(c.nJob)
 					reply.Id = job
 				}
 			default:
@@ -72,12 +70,17 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 				}
 			}
 		}
+	default:
+		{
+			reply.Type = 0
+		}
 
 	}
 	return nil
 }
 func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
-	switch c.status {
+	status := c.status.Load()
+	switch status {
 	case 0:
 		{
 			reply.Done = true
@@ -85,14 +88,15 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 1:
 		{
 			reply.Done = false
-			c.finished += 1 // add lock
+			atomic.AddInt32(&c.finished, 1)
 			if c.finished == c.nJob {
 				fmt.Println("map done")
-				for i := 0; i < c.nReduce; i++ {
+				c.status.Store(3)
+				for i := 0; i < int(c.nReduce); i++ {
 					c.RemainJobs <- i
 				}
 				c.finished = 0
-				c.status = 2
+				c.status.Store(2)
 			}
 		}
 	case 2:
@@ -100,7 +104,7 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 			reply.Done = false
 			c.finished += 1
 			if c.finished == c.nReduce {
-				c.status = 0
+				c.status.Store(0)
 
 			}
 		}
@@ -140,7 +144,8 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 
 	// Your code here.
-	return c.status == 0
+	status := c.status.Load()
+	return status == 0
 
 }
 
@@ -160,9 +165,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	c.id_counter = 0
 	c.finished = 0
-	c.nReduce = nReduce
-	c.nJob = len(files)
-	c.status = 1
+	c.nReduce = int32(nReduce)
+	c.nJob = int32(len(files))
+	c.status.Store(1)
 	c.server()
 	return &c
 }

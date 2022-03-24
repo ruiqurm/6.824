@@ -31,6 +31,8 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+var map_function, reduce_function plugin.Symbol
+
 //
 // main/mrworker.go calls this function.
 //
@@ -38,6 +40,21 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	plug, err := plugin.Open("wc.so")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	map_function, err = plug.Lookup("Map")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	reduce_function, err = plug.Lookup("Reduce")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	// 首先向master注册
 	id := Register()
 
@@ -84,16 +101,6 @@ func CallForWork(id int) int {
 		return -2
 	}
 	if reply.Type == 1 {
-		plug, err := plugin.Open("wc.so")
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		map_function, err := plug.Lookup("Map")
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
 		filename := reply.Filename
 		file, err := os.Open(filename)
 		if err != nil {
@@ -121,16 +128,6 @@ func CallForWork(id int) int {
 		}
 		return reply.Id
 	} else if reply.Type == 2 {
-		plug, err := plugin.Open("wc.so")
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
-		reduce, err := plug.Lookup("Reduce")
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
 		dict := make(map[string][]string)
 		for i := 0; i < reply.NReduce; i++ {
 			file, _ := os.Open(fmt.Sprintf("tmp/mg-%d-%d.txt", i, reply.Id))
@@ -149,7 +146,7 @@ func CallForWork(id int) int {
 		for key, values := range dict {
 			var kv KeyValue
 			kv.Key = key
-			kv.Value = reduce.(func(string, []string) string)(key, values)
+			kv.Value = reduce_function.(func(string, []string) string)(key, values)
 			result = append(result, kv)
 		}
 		sort.Slice(result, func(i, j int) bool {
