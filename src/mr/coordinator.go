@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,10 +11,12 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	RemainList  []string
-	FileStatus  map[int]int
-	TaskMapping map[int]string // ID -> filename
+	Files       []string
+	RemainJobs  chan int
+	RunningTask map[string]int
 	nReduce     int
+	nJob        int
+	finished    int
 	id_counter  int
 	status      int
 }
@@ -37,23 +40,70 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 	case 1:
 		{
 			// map阶段
-			if len(c.RemainList) != 0 {
-				reply.Type = 1
-				reply.NReduce = c.nReduce
-				reply.Filename = c.RemainList[0]
-				c.RemainList = c.RemainList[1:]
-				c.TaskMapping[args.ID] = reply.Filename
-			} else {
-				reply.Type = 0
+			select {
+			case job := <-c.RemainJobs:
+				{
+					// 有job可以运行
+					reply.Id = job
+					reply.Type = 1
+					reply.NReduce = c.nReduce
+					reply.Filename = c.Files[job]
+				}
+			default:
+				{
+					reply.Type = 0
+				}
+
 			}
 		}
 	case 2:
 		{
 			// reduce阶段
-			reply.Type = 0
-
+			select {
+			case job := <-c.RemainJobs:
+				{
+					reply.Type = 2
+					reply.NReduce = c.nJob
+					reply.Id = job
+				}
+			default:
+				{
+					reply.Type = 0
+				}
+			}
 		}
 
+	}
+	return nil
+}
+func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
+	switch c.status {
+	case 0:
+		{
+			reply.Done = true
+		}
+	case 1:
+		{
+			reply.Done = false
+			c.finished += 1 // add lock
+			if c.finished == c.nJob {
+				fmt.Println("map done")
+				for i := 0; i < c.nReduce; i++ {
+					c.RemainJobs <- i
+				}
+				c.finished = 0
+				c.status = 2
+			}
+		}
+	case 2:
+		{
+			reply.Done = false
+			c.finished += 1
+			if c.finished == c.nReduce {
+				c.status = 0
+
+			}
+		}
 	}
 	return nil
 }
@@ -88,11 +138,10 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
 
 	// Your code here.
+	return c.status == 0
 
-	return ret
 }
 
 //
@@ -104,12 +153,22 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-	c.RemainList = files
+	c.Files = files
+	c.RemainJobs = make(chan int, max(nReduce, len(files)))
+	for i := range files {
+		c.RemainJobs <- i
+	}
 	c.id_counter = 0
+	c.finished = 0
 	c.nReduce = nReduce
-	c.FileStatus = make(map[int]int)
-	c.TaskMapping = make(map[int]string)
+	c.nJob = len(files)
 	c.status = 1
 	c.server()
 	return &c
+}
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

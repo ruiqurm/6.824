@@ -36,7 +36,14 @@ type GetWorkArgs struct {
 type GetWorkReply struct {
 	NReduce  int
 	Filename string
+	Id       int
 	Type     int
+}
+type DoneWorkArgs struct {
+	Id int
+}
+type DoneWorkReply struct {
+	Done bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

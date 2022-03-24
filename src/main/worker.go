@@ -9,7 +9,6 @@ import (
 	"net/rpc"
 	"os"
 	"plugin"
-	"sort"
 	"time"
 )
 
@@ -44,10 +43,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	stop := false
 	for !stop {
 		jid := CallForWork(id)
-		if jid >= 0 {
+		if jid != -1 {
 			stop = ReplyWork(jid)
-		} else if jid == -1 {
-			stop = true
 		}
 	}
 
@@ -81,7 +78,7 @@ func CallForWork(id int) int {
 		// go to sleep
 		fmt.Println("sleep")
 		time.Sleep(time.Duration(1) * time.Second)
-		return -2
+		return -1
 	}
 	if reply.Type == 1 {
 		plug, err := plugin.Open("wc.so")
@@ -104,20 +101,18 @@ func CallForWork(id int) int {
 			log.Fatalf("cannot read %v", filename)
 		}
 		var encoders []*json.Encoder
-		// var files []*os.File
+		var files []*os.File
 		for i := 0; i < reply.NReduce; i++ {
-			file, err := ioutil.TempFile("tmp", "tmpfile")
-			if err != nil {
-				panic(err)
-			}
+			file, _ := os.Create(fmt.Sprintf("mr-%d-%d", reply.Id, i))
 			encoders = append(encoders, json.NewEncoder(file))
-			defer os.Rename(file.Name(), "tmp/"+fmt.Sprintf("mg-%v-%v.txt", id, i))
-			defer file.Close()
 		}
 		// save file in format: mg-job-reduce.txt
 		for _, obj := range map_function.(func(string, string) []KeyValue)(filename, string(content)) {
 			key := obj.Key
 			encoders[ihash(key)%reply.NReduce].Encode(&obj)
+		}
+		for _, file := range files {
+			file.Close()
 		}
 		return reply.Id
 	} else if reply.Type == 2 {
@@ -131,15 +126,16 @@ func CallForWork(id int) int {
 			fmt.Println(err)
 			os.Exit(1)
 		}
-		dict := make(map[string][]string)
+		var dict map[string][]string
 		for i := 0; i < reply.NReduce; i++ {
-			file, _ := os.Open(fmt.Sprintf("tmp/mg-%d-%d.txt", i, reply.Id))
+			file, _ := os.Open(fmt.Sprintf("mr-%d-%d", i, reply.Id))
 			dec := json.NewDecoder(file)
 			for {
 				var kv KeyValue
 				if err := dec.Decode(&kv); err != nil {
 					break
 				} else {
+					dict[kv.Key] = make([]string, 0)
 					dict[kv.Key] = append(dict[kv.Key], kv.Value)
 				}
 			}
@@ -150,16 +146,13 @@ func CallForWork(id int) int {
 			var kv KeyValue
 			kv.Key = key
 			kv.Value = reduce.(func(string, []string) string)(key, values)
-			result = append(result, kv)
 		}
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].Value > result[j].Value
-		})
-		file, _ := os.Create(fmt.Sprintf("mr-out-%d.txt", reply.Id))
-		defer file.Close()
-		for _, kv := range result {
-			fmt.Fprint(file, kv.Key+"\t"+kv.Value+"\n")
+		file, _ := os.Create(fmt.Sprintf("mr-%d.txt", reply.Id))
+		encoder := json.NewEncoder(file)
+		for kv := range result {
+			encoder.Encode(&kv)
 		}
+		file.Close()
 		return reply.Id
 	}
 	return -1
