@@ -7,19 +7,22 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"sync/atomic"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	Files       []string // imutable
-	RemainJobs  chan int
-	RunningTask map[string]int // no used
-	nReduce     int32          // imutable
-	nJob        int32          // imutable
-	finished    int32          // count for finished jobs
-	id_counter  int32          // no used
-	status      atomic.Value
+	Files        []string // imutable
+	RemainJobs   chan int
+	RunningTask  map[string]int // no used
+	JobCond      *sync.Cond
+	JobCondMutex *sync.Mutex
+	nReduce      int32 // imutable
+	nJob         int32 // imutable
+	finished     int32 // count for finished jobs
+	id_counter   int32 // no used
+	status       atomic.Value
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -27,56 +30,65 @@ type Coordinator struct {
 type EmptyRequest struct{}
 
 func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
-	reply.ID = int(c.id_counter)
-	atomic.AddInt32(&c.id_counter, 1)
+	// reply.ID = int(c.id_counter)
+	// atomic.AddInt32(&c.id_counter, 1)
+	reply.ID = 0
 	return nil
 }
 
 func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
-	status := c.status.Load()
-	switch status {
-	case 1:
-		{
-			// map阶段
-			select {
-			case job := <-c.RemainJobs:
-				{
-					// 有job可以运行
-					reply.Id = job
-					reply.Type = 1
-					reply.NReduce = int(c.nReduce)
-					reply.Filename = c.Files[job]
-				}
-			default:
-				{
-					reply.Type = 0
-				}
+	for {
+		status := c.status.Load()
+		switch status {
+		case 1:
+			{
+				// map阶段
+				select {
+				case job := <-c.RemainJobs:
+					{
+						// 有job可以运行
+						reply.Id = job
+						reply.Type = 1
+						reply.NReduce = int(c.nReduce)
+						reply.Filename = c.Files[job]
+						return nil
+					}
+				default:
+					{
+						c.JobCondMutex.Lock()
+						c.JobCond.Wait()
+						c.JobCondMutex.Unlock()
+					}
 
-			}
-		}
-	case 2:
-		{
-			// reduce阶段
-			select {
-			case job := <-c.RemainJobs:
-				{
-					reply.Type = 2
-					reply.NReduce = int(c.nJob)
-					reply.Id = job
-				}
-			default:
-				{
-					reply.Type = 0
 				}
 			}
-		}
-	default:
-		{
-			reply.Type = 0
-		}
+		case 2:
+			{
+				// reduce阶段
+				select {
+				case job := <-c.RemainJobs:
+					{
+						reply.Type = 2
+						reply.NReduce = int(c.nJob)
+						reply.Id = job
+						return nil
+					}
+				default:
+					{
+						c.JobCondMutex.Lock()
+						c.JobCond.Wait()
+						c.JobCondMutex.Unlock()
+					}
+				}
+			}
+		default:
+			{
+				reply.Type = 0
+				return nil
+			}
 
+		}
 	}
-	return nil
 }
 func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	status := c.status.Load()
@@ -95,6 +107,7 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 				for i := 0; i < int(c.nReduce); i++ {
 					c.RemainJobs <- i
 				}
+				c.JobCond.Broadcast()
 				c.finished = 0
 				c.status.Store(2)
 			}
@@ -158,11 +171,19 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
+	// tmp, err := os.MkdirTemp("", "example")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer os.RemoveAll(tmp)
 	c.Files = files
 	c.RemainJobs = make(chan int, max(nReduce, len(files)))
 	for i := range files {
 		c.RemainJobs <- i
 	}
+
+	c.JobCondMutex = &sync.Mutex{}
+	c.JobCond = sync.NewCond(c.JobCondMutex)
 	c.id_counter = 0
 	c.finished = 0
 	c.nReduce = int32(nReduce)

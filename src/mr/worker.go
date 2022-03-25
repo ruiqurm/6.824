@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
-	"plugin"
 	"sort"
-	"time"
 )
 
 //
@@ -31,7 +29,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-var map_function, reduce_function plugin.Symbol
+// var map_function, reduce_function plugin.Symbol
 
 //
 // main/mrworker.go calls this function.
@@ -40,27 +38,25 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	plug, err := plugin.Open("wc.so")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	map_function, err = plug.Lookup("Map")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	reduce_function, err = plug.Lookup("Reduce")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	// load wc.so plugin
+	// plug, err := plugin.Open("/home/ruiqurm/lab/6.824/src/mrapps/wc.so")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// map_function, err = plug.Lookup("Map")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// reduce_function, err = plug.Lookup("Reduce")
+	// if err != nil {
+	// 	panic(err)
+	// }
 	// 首先向master注册
 	id := Register()
 
 	stop := false
 	for !stop {
-		jid := CallForWork(id)
+		jid := CallForWork(id, mapf, reducef)
 		if jid >= 0 {
 			stop = ReplyWork(jid)
 		} else if jid == -1 {
@@ -85,81 +81,92 @@ func Register() int {
 }
 
 // 获取一个map或者reduce
-func CallForWork(id int) int {
+func CallForWork(id int, mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) int {
 	args := GetWorkArgs{}
 	reply := GetWorkReply{}
 	args.ID = id
 	ok := call("Coordinator.GetWork", &args, &reply)
 	if !ok {
-		fmt.Println("call failed!")
-		os.Exit(1)
+		fmt.Println("can not connect with server;close worker")
+		os.Exit(0)
 	}
-	if reply.Type == 0 {
-		// go to sleep
-		fmt.Println("sleep")
-		time.Sleep(time.Duration(1) * time.Second)
-		return -2
-	}
-	if reply.Type == 1 {
-		filename := reply.Filename
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v", filename)
-		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", filename)
-		}
-		var encoders []*json.Encoder
-		// var files []*os.File
-		for i := 0; i < reply.NReduce; i++ {
-			file, err := ioutil.TempFile("tmp", "tmpfile")
-			if err != nil {
-				panic(err)
+	switch reply.Type {
+	// case 0:
+	// 	{
+	// 		// go to sleep
+	// 		fmt.Println("sleep")
+	// 		time.Sleep(time.Duration(1) * time.Second)
+	// 		return -2
+	// 	}
+	case 1:
+		{
+			// read file from server
+			filename := reply.Filename
+			file, err := os.Open(filename)
+			check_or_panic(err)
+			content, err := io.ReadAll(file)
+			check_or_panic(err)
+			// save middle file as json list
+			var encoders []*json.Encoder
+			for i := 0; i < reply.NReduce; i++ {
+				// create temp file to avoid conflict
+				file, err := os.CreateTemp("", "tmpfile")
+				check_or_panic(err)
+				encoders = append(encoders, json.NewEncoder(file))
+				// save file in format: mg-job-reduce.txt
+				defer os.Rename(file.Name(), fmt.Sprintf("mg-%v-%v.txt", reply.Id, i))
+				defer file.Close()
 			}
-			encoders = append(encoders, json.NewEncoder(file))
-			defer os.Rename(file.Name(), "tmp/"+fmt.Sprintf("mg-%v-%v.txt", id, i))
-			defer file.Close()
+			// map_function.(func(string, string) []KeyValue)(filename, string(content))
+			for _, obj := range mapf(filename, string(content)) {
+				key := obj.Key
+				encoders[ihash(key)%reply.NReduce].Encode(&obj)
+			}
+			return reply.Id
+
 		}
-		// save file in format: mg-job-reduce.txt
-		for _, obj := range map_function.(func(string, string) []KeyValue)(filename, string(content)) {
-			key := obj.Key
-			encoders[ihash(key)%reply.NReduce].Encode(&obj)
-		}
-		return reply.Id
-	} else if reply.Type == 2 {
-		dict := make(map[string][]string)
-		for i := 0; i < reply.NReduce; i++ {
-			file, _ := os.Open(fmt.Sprintf("tmp/mg-%d-%d.txt", i, reply.Id))
-			dec := json.NewDecoder(file)
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
-				} else {
-					dict[kv.Key] = append(dict[kv.Key], kv.Value)
+	case 2:
+		{
+			dict := make(map[string][]string)
+			for i := 0; i < reply.NReduce; i++ {
+				file, err := os.Open(fmt.Sprintf("mg-%d-%d.txt", i, reply.Id))
+				check_or_panic(err)
+				dec := json.NewDecoder(file)
+				for {
+					var kv KeyValue
+					if err := dec.Decode(&kv); err != nil {
+						break
+					} else {
+						dict[kv.Key] = append(dict[kv.Key], kv.Value)
+					}
 				}
+				file.Close()
+				os.Remove(file.Name())
 			}
-			file.Close()
+			var result []KeyValue
+			for key, values := range dict {
+				var kv KeyValue
+				kv.Key = key
+				kv.Value = reducef(key, values)
+				result = append(result, kv)
+			}
+			sort.Slice(result, func(i, j int) bool {
+				return result[i].Value > result[j].Value
+			})
+			file, _ := os.Create(fmt.Sprintf("mr-out-%d.txt", reply.Id))
+			defer file.Close()
+			for _, kv := range result {
+				fmt.Fprint(file, kv.Key+" "+kv.Value+"\n")
+			}
+			return reply.Id
 		}
-		var result []KeyValue
-		for key, values := range dict {
-			var kv KeyValue
-			kv.Key = key
-			kv.Value = reduce_function.(func(string, []string) string)(key, values)
-			result = append(result, kv)
+	default:
+		{
+			return -1
 		}
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].Value > result[j].Value
-		})
-		file, _ := os.Create(fmt.Sprintf("mr-out-%d.txt", reply.Id))
-		defer file.Close()
-		for _, kv := range result {
-			fmt.Fprint(file, kv.Key+"\t"+kv.Value+"\n")
-		}
-		return reply.Id
 	}
-	return -1
+	// unreachable
 }
 
 func ReplyWork(filename int) bool {
@@ -168,8 +175,8 @@ func ReplyWork(filename int) bool {
 	args.Id = filename
 	ok := call("Coordinator.DoneWork", &args, &reply)
 	if !ok {
-		fmt.Println("call failed!")
-		os.Exit(1)
+		fmt.Println("can not connect with server;close worker")
+		os.Exit(0)
 	}
 	return reply.Done
 }
@@ -224,4 +231,10 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func check_or_panic(err error) {
+	if err != nil {
+		panic(err)
+	}
 }
