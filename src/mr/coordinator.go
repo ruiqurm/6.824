@@ -20,6 +20,7 @@ type Coordinator struct {
 	JobCondMutex *sync.Mutex
 	nReduce      int32 // imutable
 	nJob         int32 // imutable
+	finishedLock *sync.Mutex
 	finished     int32 // count for finished jobs
 	id_counter   int32 // no used
 	status       atomic.Value
@@ -100,7 +101,9 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 1:
 		{
 			reply.Done = false
-			atomic.AddInt32(&c.finished, 1)
+			c.finishedLock.Lock()
+			c.finished += 1
+			defer c.finishedLock.Unlock()
 			if c.finished == c.nJob {
 				fmt.Println("map done")
 				c.status.Store(3)
@@ -115,10 +118,11 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 2:
 		{
 			reply.Done = false
+			c.finishedLock.Lock()
 			c.finished += 1
+			defer c.finishedLock.Unlock()
 			if c.finished == c.nReduce {
 				c.status.Store(0)
-
 			}
 		}
 	}
@@ -185,6 +189,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.JobCondMutex = &sync.Mutex{}
 	c.JobCond = sync.NewCond(c.JobCondMutex)
 	c.id_counter = 0
+	c.finishedLock = &sync.Mutex{}
 	c.finished = 0
 	c.nReduce = int32(nReduce)
 	c.nJob = int32(len(files))
