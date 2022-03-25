@@ -31,16 +31,17 @@ type RegisterReply struct {
 }
 
 type GetWorkArgs struct {
-	ID int
 }
 type GetWorkReply struct {
 	NReduce  int
 	Filename string
 	Id       int
 	Type     int
+	Token    string
 }
 type DoneWorkArgs struct {
-	Id int
+	ID    int
+	Token string
 }
 type DoneWorkReply struct {
 	Done bool

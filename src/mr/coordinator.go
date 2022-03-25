@@ -9,20 +9,24 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
+type Task struct {
+	Job       int
+	StartTime int64
+}
 type Coordinator struct {
 	// Your definitions here.
 	Files        []string // imutable
+	nReduce      int32    // imutable
+	nJob         int32    // imutable
 	RemainJobs   chan int
-	RunningTask  map[string]int // no used
+	RunningTask  sync.Map //
 	JobCond      *sync.Cond
 	JobCondMutex *sync.Mutex
-	nReduce      int32 // imutable
-	nJob         int32 // imutable
 	finishedLock *sync.Mutex
 	finished     int32 // count for finished jobs
-	id_counter   int32 // no used
 	status       atomic.Value
 }
 
@@ -30,12 +34,12 @@ type Coordinator struct {
 
 type EmptyRequest struct{}
 
-func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
-	// reply.ID = int(c.id_counter)
-	// atomic.AddInt32(&c.id_counter, 1)
-	reply.ID = 0
-	return nil
-}
+// func (c *Coordinator) Register(args *RegisterArgs, reply *RegisterReply) error {
+// 	// reply.ID = int(c.id_counter)
+// 	// atomic.AddInt32(&c.id_counter, 1)
+// 	reply.ID = 0
+// 	return nil
+// }
 
 func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 	for {
@@ -52,10 +56,14 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 						reply.Type = 1
 						reply.NReduce = int(c.nReduce)
 						reply.Filename = c.Files[job]
+						now := time.Now().UnixMilli()
+						reply.Token = fmt.Sprintf("%v-%v", now, job)
+						c.RunningTask.Store(reply.Token, Task{job, now})
 						return nil
 					}
 				default:
 					{
+						fmt.Println("wait")
 						c.JobCondMutex.Lock()
 						c.JobCond.Wait()
 						c.JobCondMutex.Unlock()
@@ -72,6 +80,9 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 						reply.Type = 2
 						reply.NReduce = int(c.nJob)
 						reply.Id = job
+						now := time.Now().UnixMilli()
+						reply.Token = fmt.Sprintf("%v-%v", now, job)
+						c.RunningTask.Store(reply.Token, Task{job, now})
 						return nil
 					}
 				default:
@@ -85,6 +96,7 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 		default:
 			{
 				reply.Type = 0
+				reply.Token = ""
 				return nil
 			}
 
@@ -92,6 +104,12 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 	}
 }
 func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
+	_, found := c.RunningTask.Load(args.Token)
+	if !found {
+		fmt.Println("token not found", args.ID, args.Token)
+		reply.Done = false
+		return nil
+	}
 	status := c.status.Load()
 	switch status {
 	case 0:
@@ -101,6 +119,8 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 1:
 		{
 			reply.Done = false
+			c.RunningTask.Delete(args.Token)
+			fmt.Println("Done map", args.ID)
 			c.finishedLock.Lock()
 			c.finished += 1
 			defer c.finishedLock.Unlock()
@@ -118,10 +138,14 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 2:
 		{
 			reply.Done = false
+			c.RunningTask.Delete(args.Token)
+			fmt.Println("Done reduce", args.ID)
 			c.finishedLock.Lock()
 			c.finished += 1
 			defer c.finishedLock.Unlock()
 			if c.finished == c.nReduce {
+				fmt.Println("reduce done")
+				c.JobCond.Broadcast()
 				c.status.Store(0)
 			}
 		}
@@ -161,6 +185,18 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 
 	// Your code here.
+	// check and kill zombie jobs
+	now := time.Now().UnixMilli()
+	c.RunningTask.Range(func(key, value interface{}) bool {
+		timestamp := value.(Task).StartTime
+		if now-timestamp > 10000 {
+			fmt.Println("kill zombie job", value.(Task).Job)
+			c.RunningTask.Delete(key)
+			c.RemainJobs <- value.(Task).Job
+			c.JobCond.Broadcast()
+		}
+		return true
+	})
 	status := c.status.Load()
 	return status == 0
 
@@ -188,7 +224,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.JobCondMutex = &sync.Mutex{}
 	c.JobCond = sync.NewCond(c.JobCondMutex)
-	c.id_counter = 0
 	c.finishedLock = &sync.Mutex{}
 	c.finished = 0
 	c.nReduce = int32(nReduce)

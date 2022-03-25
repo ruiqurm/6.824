@@ -52,15 +52,12 @@ func Worker(mapf func(string, string) []KeyValue,
 	// 	panic(err)
 	// }
 	// 首先向master注册
-	id := Register()
+	// id := Register()
 
 	stop := false
 	for !stop {
-		jid := CallForWork(id, mapf, reducef)
-		if jid >= 0 {
-			stop = ReplyWork(jid)
-		} else if jid == -1 {
-			stop = true
+		if !CallForWork(mapf, reducef) {
+			break
 		}
 	}
 
@@ -81,24 +78,16 @@ func Register() int {
 }
 
 // 获取一个map或者reduce
-func CallForWork(id int, mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) int {
+func CallForWork(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) bool {
 	args := GetWorkArgs{}
 	reply := GetWorkReply{}
-	args.ID = id
 	ok := call("Coordinator.GetWork", &args, &reply)
 	if !ok {
 		fmt.Println("can not connect with server;close worker")
 		os.Exit(0)
 	}
 	switch reply.Type {
-	// case 0:
-	// 	{
-	// 		// go to sleep
-	// 		fmt.Println("sleep")
-	// 		time.Sleep(time.Duration(1) * time.Second)
-	// 		return -2
-	// 	}
 	case 1:
 		{
 			// read file from server
@@ -123,7 +112,6 @@ func CallForWork(id int, mapf func(string, string) []KeyValue,
 				key := obj.Key
 				encoders[ihash(key)%reply.NReduce].Encode(&obj)
 			}
-			return reply.Id
 
 		}
 	case 2:
@@ -142,7 +130,7 @@ func CallForWork(id int, mapf func(string, string) []KeyValue,
 					}
 				}
 				file.Close()
-				os.Remove(file.Name())
+				defer os.Remove(file.Name())
 			}
 			var result []KeyValue
 			for key, values := range dict {
@@ -159,20 +147,20 @@ func CallForWork(id int, mapf func(string, string) []KeyValue,
 			for _, kv := range result {
 				fmt.Fprint(file, kv.Key+" "+kv.Value+"\n")
 			}
-			return reply.Id
 		}
 	default:
 		{
-			return -1
+			return false
 		}
 	}
-	// unreachable
+	return !ReplyWork(reply.Id, reply.Token)
 }
 
-func ReplyWork(filename int) bool {
+func ReplyWork(id int, token string) bool {
 	args := DoneWorkArgs{}
 	reply := DoneWorkReply{}
-	args.Id = filename
+	args.ID = id
+	args.Token = token
 	ok := call("Coordinator.DoneWork", &args, &reply)
 	if !ok {
 		fmt.Println("can not connect with server;close worker")
