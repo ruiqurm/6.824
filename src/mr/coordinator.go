@@ -119,38 +119,58 @@ func (c *Coordinator) DoneWork(args *DoneWorkArgs, reply *DoneWorkReply) error {
 	case 1:
 		{
 			reply.Done = false
-			c.RunningTask.Delete(args.Token)
-			fmt.Println("Done map", args.ID)
-			c.finishedLock.Lock()
-			c.finished += 1
-			defer c.finishedLock.Unlock()
-			if c.finished == c.nJob {
-				fmt.Println("map done")
-				c.status.Store(3)
-				for i := 0; i < int(c.nReduce); i++ {
-					c.RemainJobs <- i
-				}
-				c.JobCond.Broadcast()
-				c.finished = 0
-				c.status.Store(2)
-			}
+			c.mark_map_done(args.Token, args.ID)
 		}
 	case 2:
 		{
 			reply.Done = false
-			c.RunningTask.Delete(args.Token)
-			fmt.Println("Done reduce", args.ID)
-			c.finishedLock.Lock()
-			c.finished += 1
-			defer c.finishedLock.Unlock()
-			if c.finished == c.nReduce {
-				fmt.Println("reduce done")
-				c.JobCond.Broadcast()
-				c.status.Store(0)
-			}
+			c.mark_reduce_done(args.Token, args.ID)
 		}
 	}
 	return nil
+}
+func (c *Coordinator) mark_map_done(token string, ID int) {
+	c.RunningTask.Delete(token)
+	fmt.Println("Done map", ID)
+	c.finishedLock.Lock()
+	c.finished += 1
+	defer c.finishedLock.Unlock()
+	if c.finished == c.nJob {
+		fmt.Println("map done")
+		c.status.Store(3)
+		for i := 0; i < int(c.nReduce); i++ {
+			c.RemainJobs <- i
+		}
+		c.JobCond.Broadcast()
+		c.finished = 0
+		c.status.Store(2)
+	}
+}
+func (c *Coordinator) mark_reduce_done(token string, ID int) {
+	c.RunningTask.Delete(token)
+	fmt.Println("Done reduce", ID)
+	c.finishedLock.Lock()
+	c.finished += 1
+	defer c.finishedLock.Unlock()
+	if c.finished == c.nReduce {
+		fmt.Println("reduce done")
+		c.JobCond.Broadcast()
+		c.status.Store(0)
+	}
+}
+
+func (c *Coordinator) ignore_failure(token string, ID int) {
+	status := c.status.Load()
+	if status == 1 {
+		c.mark_map_done(token, ID)
+	} else if status == 2 {
+		c.mark_reduce_done(token, ID)
+	}
+}
+func (c *Coordinator) retry(token string, ID int) {
+	c.RunningTask.Delete(token)
+	c.RemainJobs <- ID
+	c.JobCond.Broadcast()
 }
 
 // an example RPC handler.
@@ -191,9 +211,7 @@ func (c *Coordinator) Done() bool {
 		timestamp := value.(Task).StartTime
 		if now-timestamp > 10000 {
 			fmt.Println("kill zombie job", value.(Task).Job)
-			c.RunningTask.Delete(key)
-			c.RemainJobs <- value.(Task).Job
-			c.JobCond.Broadcast()
+			c.retry(key.(string), value.(Task).Job)
 		}
 		return true
 	})

@@ -87,6 +87,7 @@ func CallForWork(mapf func(string, string) []KeyValue,
 		fmt.Println("can not connect with server;close worker")
 		os.Exit(0)
 	}
+	var ret bool
 	switch reply.Type {
 	case 1:
 		{
@@ -98,20 +99,26 @@ func CallForWork(mapf func(string, string) []KeyValue,
 			check_or_panic(err)
 			// save middle file as json list
 			var encoders []*json.Encoder
+			// var files []*os.File
 			for i := 0; i < reply.NReduce; i++ {
 				// create temp file to avoid conflict
 				file, err := os.CreateTemp("", "tmpfile")
 				check_or_panic(err)
 				encoders = append(encoders, json.NewEncoder(file))
 				// save file in format: mg-job-reduce.txt
-				defer os.Rename(file.Name(), fmt.Sprintf("mg-%v-%v.txt", reply.Id, i))
+				// files = append(files, file)
 				defer file.Close()
+				defer os.Rename(file.Name(), fmt.Sprintf("mg-%v-%v.txt", reply.Id, i))
 			}
 			// map_function.(func(string, string) []KeyValue)(filename, string(content))
 			for _, obj := range mapf(filename, string(content)) {
 				key := obj.Key
 				encoders[ihash(key)%reply.NReduce].Encode(&obj)
 			}
+			ret = !ReplyWork(reply.Id, reply.Token)
+			// for i := range files {
+
+			// }
 
 		}
 	case 2:
@@ -147,13 +154,14 @@ func CallForWork(mapf func(string, string) []KeyValue,
 			for _, kv := range result {
 				fmt.Fprint(file, kv.Key+" "+kv.Value+"\n")
 			}
+			ret = !ReplyWork(reply.Id, reply.Token)
 		}
 	default:
 		{
-			return false
+			ret = false
 		}
 	}
-	return !ReplyWork(reply.Id, reply.Token)
+	return ret
 }
 
 func ReplyWork(id int, token string) bool {
