@@ -24,7 +24,6 @@ type Coordinator struct {
 	RemainJobs   chan int
 	RunningTask  sync.Map //
 	JobCond      *sync.Cond
-	JobCondMutex *sync.Mutex
 	finishedLock *sync.Mutex
 	finished     int32 // count for finished jobs
 	status       atomic.Value
@@ -64,9 +63,9 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 				default:
 					{
 						fmt.Println("wait")
-						c.JobCondMutex.Lock()
+						c.JobCond.L.Lock()
 						c.JobCond.Wait()
-						c.JobCondMutex.Unlock()
+						c.JobCond.L.Unlock()
 					}
 
 				}
@@ -87,9 +86,9 @@ func (c *Coordinator) GetWork(args *GetWorkArgs, reply *GetWorkReply) error {
 					}
 				default:
 					{
-						c.JobCondMutex.Lock()
+						c.JobCond.L.Lock()
 						c.JobCond.Wait()
-						c.JobCondMutex.Unlock()
+						c.JobCond.L.Unlock()
 					}
 				}
 			}
@@ -240,8 +239,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.RemainJobs <- i
 	}
 
-	c.JobCondMutex = &sync.Mutex{}
-	c.JobCond = sync.NewCond(c.JobCondMutex)
+	c.JobCond = sync.NewCond(&sync.Mutex{})
 	c.finishedLock = &sync.Mutex{}
 	c.finished = 0
 	c.nReduce = int32(nReduce)
