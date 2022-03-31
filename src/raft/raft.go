@@ -59,8 +59,8 @@ const (
 )
 const (
 	HEARTBEAT_INTERVAL   = 100
-	ELECTION_MIN_TIMEOUT = 3 * HEARTBEAT_INTERVAL
-	ELECTION_MAX_TIMEOUT = 5 * HEARTBEAT_INTERVAL
+	ELECTION_MIN_TIMEOUT = 5 * HEARTBEAT_INTERVAL
+	ELECTION_MAX_TIMEOUT = 10 * HEARTBEAT_INTERVAL
 	RETRY_TIMEOUT        = 100
 	MAX_RETRY            = 1
 )
@@ -210,9 +210,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//log.Printf("[%v] receive AppendEntries from %d", rf.me, args.LeaderId)
 }
 
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
@@ -283,7 +280,8 @@ func (rf *Raft) sendRequestVote(server int, vote *int32, done *int32, currentTer
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.state = FOLLOWER
-			} else {
+			}
+			if reply.VoteGranted {
 				atomic.AddInt32(vote, 1)
 			}
 			rf.mu.Unlock()
@@ -353,6 +351,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
+	rf.currentTerm = 0
+	rf.votedFor = rf.me
+	rf.state = FOLLOWER
+	rf.electionFlag = true
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) killed() bool {
@@ -371,14 +375,15 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 
 		time.Sleep(time.Duration(rand.Int63()%(ELECTION_TIMEOUT_RANGE)+ELECTION_MIN_TIMEOUT) * time.Millisecond)
-		//log.Printf("[%v] sleep wake up\n", rf.me)
 		// after sleep, start a new election
-		if rf.state == LEADER {
-			continue
-		}
+
 		var currentTerm int
 		var me int
 		rf.mu.Lock()
+		if rf.state == LEADER {
+			rf.mu.Unlock()
+			continue
+		}
 		if !rf.electionFlag {
 			//log.Printf("[%v] heartbeat verified\n", rf.me)
 			rf.electionFlag = true
@@ -440,9 +445,11 @@ func (rf *Raft) ticker() {
 				// re-acquire the mutex to check if it is still leader
 				rf.mu.Lock()
 			}
+			//log.Printf("[%v] is no longer leader\n", rf.me)
 			rf.mu.Unlock()
 		}(n)
 	}
+	//log.Printf("[%v] self suicide\n", rf.me)
 }
 
 //
@@ -464,6 +471,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+
 	rf.currentTerm = 0
 	rf.votedFor = me
 	rf.state = FOLLOWER
