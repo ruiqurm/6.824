@@ -59,8 +59,8 @@ const (
 )
 const (
 	HEARTBEAT_INTERVAL   = 100
-	ELECTION_MIN_TIMEOUT = 5 * HEARTBEAT_INTERVAL
-	ELECTION_MAX_TIMEOUT = 10 * HEARTBEAT_INTERVAL
+	ELECTION_MIN_TIMEOUT = 7 * HEARTBEAT_INTERVAL
+	ELECTION_MAX_TIMEOUT = 11 * HEARTBEAT_INTERVAL
 	RETRY_TIMEOUT        = 100
 	MAX_RETRY            = 1
 )
@@ -193,6 +193,11 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.killed() {
+		reply.Term = 0
+		reply.Success = false
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
@@ -212,6 +217,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if rf.killed() {
+		reply.Term = 0
+		reply.VoteGranted = false
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term > rf.currentTerm {
@@ -219,16 +229,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.state == LEADER || rf.state == CANDIDATE {
 			rf.state = FOLLOWER
 		}
+		//log.Printf("[%v] receive from [%v],grant vote;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term // update term
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.electionFlag = false // refresh election timer
-		//log.Printf("[%v] receive from [%v],grant vote\n", rf.me, args.CandidateId)
 	} else {
 		// otherwise, deny vote
+		//log.Printf("[%v] receive from [%v],reject;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		//log.Printf("[%v] receive from [%v],reject\n", rf.me, args.CandidateId)
 	}
 }
 
@@ -261,54 +272,52 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, vote *int32, done *int32, currentTerm int, me int, cond *sync.Cond) {
+func (rf *Raft) sendRequestVote(server int, vote chan int32, done chan int32, currentTerm int, me int) {
 	args := RequestVoteArgs{}
 	args.Term = currentTerm
 	args.CandidateId = me
 	reply := RequestVoteReply{}
-	times := 0
-	for times != MAX_RETRY {
-		ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
-		rf.mu.Lock()
-		if rf.state != CANDIDATE {
-			rf.mu.Unlock()
-			atomic.AddInt32(done, 1)
-			cond.Broadcast()
-			return
-		}
-		if ok {
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.state = FOLLOWER
-			}
-			if reply.VoteGranted {
-				atomic.AddInt32(vote, 1)
-			}
-			rf.mu.Unlock()
-			atomic.AddInt32(done, 1)
-			cond.Broadcast()
-			return
-		}
-		rf.mu.Unlock()
-		time.Sleep(time.Duration(RETRY_TIMEOUT * time.Millisecond))
-		times++
+	// times := 0
+	// for times != MAX_RETRY {
+	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != CANDIDATE {
+		done <- 1
+		return
 	}
+	if ok {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = FOLLOWER
+		}
+		if reply.VoteGranted {
+			vote <- 1
+		}
+	}
+	done <- 1
+	// 	time.Sleep(time.Duration(RETRY_TIMEOUT * time.Millisecond))
+	// 	times++
+	// }
 }
 
 func (rf *Raft) sendAppendEntries(server int, wg *sync.WaitGroup) {
 	args := AppendEntriesArgs{}
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
+	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
 	//log.Printf("[%v] send heartbeat to %v\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	if ok {
+		rf.mu.Lock()
+		//log.Printf("[%v] leader receive reply.Term=%v,self=%v\n", rf.me, rf.currentTerm, reply.Term)
 		if reply.Term > rf.currentTerm {
 			rf.state = FOLLOWER
 			rf.currentTerm = reply.Term
 		}
+		rf.mu.Unlock()
 	}
 	wg.Done()
 }
@@ -353,10 +362,12 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.currentTerm = 0
-	rf.votedFor = rf.me
+	rf.votedFor = -1
 	rf.state = FOLLOWER
 	rf.electionFlag = true
+	//log.Printf("\033[31m[%v] be killed\n\033[0m", rf.me)
 	rf.mu.Unlock()
+	time.Sleep(time.Duration(time.Second))
 }
 
 func (rf *Raft) killed() bool {
@@ -400,35 +411,47 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 		go func(total int) {
 			// start a new election
+			done_chan := make(chan int32, 4)
+			vote_chan := make(chan int32, 4)
 			var done int32 = 0
 			var vote int32 = 0
-			cond := sync.NewCond(&sync.Mutex{})
 			//log.Printf("[%v] start a new election. total=%v\n", rf.me, total)
 			for server := 0; server < n; server++ {
 				if server != me {
-					go rf.sendRequestVote(server, &vote, &done, currentTerm, me, cond)
+					go rf.sendRequestVote(server, vote_chan, done_chan, currentTerm, me)
 				}
 			}
-			for {
-				cond.L.Lock()
-				cond.Wait()
-				cond.L.Unlock()
-				if int(atomic.LoadInt32(&vote)) >= total/2 {
-					// "=" beacause candidate will vote themselves
-					//log.Printf("[%v] win the election\n", rf.me)
-					rf.mu.Lock()
-					rf.state = LEADER
-					// note: here does not unlock
-					break
-				}
-				if int(atomic.LoadInt32(&done)) == total {
-					//log.Printf("[%v] loss the election\n", rf.me)
-					return
+			ok := false
+			for !ok {
+				select {
+				case dv := <-done_chan:
+					{
+						v := atomic.LoadInt32(&done)
+						v += dv
+						if v == int32(total) {
+							// election failed
+							return
+						}
+						atomic.StoreInt32(&done, v)
+					}
+
+				case vv := <-vote_chan:
+					{
+						v := atomic.LoadInt32(&vote)
+						v += vv
+						if v >= int32(total/2) {
+							ok = true
+							break
+						}
+						atomic.StoreInt32(&vote, v)
+					}
 				}
 			}
 
 			// if it wins the election, it begins to send heartbeat
 			// here it have required the mutex
+			rf.mu.Lock()
+			rf.state = LEADER
 			currentTerm = rf.currentTerm
 			for rf.state == LEADER && !rf.killed() {
 				rf.mu.Unlock()
@@ -445,11 +468,11 @@ func (rf *Raft) ticker() {
 				// re-acquire the mutex to check if it is still leader
 				rf.mu.Lock()
 			}
-			//log.Printf("[%v] is no longer leader\n", rf.me)
+			//log.Printf("\033[31m[%v] is no longer leader\033[0m\n", rf.me)
 			rf.mu.Unlock()
 		}(n)
 	}
-	//log.Printf("[%v] self suicide\n", rf.me)
+	//log.Printf("\033[31m[%v] self suicide\033[0m\n", rf.me)
 }
 
 //
