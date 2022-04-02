@@ -59,8 +59,8 @@ const (
 )
 const (
 	HEARTBEAT_INTERVAL   = 100
-	ELECTION_MIN_TIMEOUT = 7 * HEARTBEAT_INTERVAL
-	ELECTION_MAX_TIMEOUT = 11 * HEARTBEAT_INTERVAL
+	ELECTION_MIN_TIMEOUT = 5 * HEARTBEAT_INTERVAL
+	ELECTION_MAX_TIMEOUT = 8 * HEARTBEAT_INTERVAL
 	RETRY_TIMEOUT        = 100
 	MAX_RETRY            = 1
 )
@@ -366,8 +366,14 @@ func (rf *Raft) Kill() {
 	rf.state = FOLLOWER
 	rf.electionFlag = true
 	//log.Printf("\033[31m[%v] be killed\n\033[0m", rf.me)
+	var wait_to_start_time int
+	if len(rf.peers)*HEARTBEAT_INTERVAL > 1000 {
+		wait_to_start_time = 1000
+	} else {
+		wait_to_start_time = len(rf.peers) * HEARTBEAT_INTERVAL
+	}
 	rf.mu.Unlock()
-	time.Sleep(time.Duration(time.Second))
+	time.Sleep(time.Duration(wait_to_start_time) * time.Millisecond)
 }
 
 func (rf *Raft) killed() bool {
@@ -388,8 +394,6 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(rand.Int63()%(ELECTION_TIMEOUT_RANGE)+ELECTION_MIN_TIMEOUT) * time.Millisecond)
 		// after sleep, start a new election
 
-		var currentTerm int
-		var me int
 		rf.mu.Lock()
 		if rf.state == LEADER {
 			rf.mu.Unlock()
@@ -401,78 +405,82 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 			continue
 		}
-		//log.Printf("[%v] election timer up\n", rf.me)
-		rf.state = CANDIDATE
-		rf.currentTerm += 1
-		rf.votedFor = rf.me
-		currentTerm = rf.currentTerm
-		me = rf.me
-		n := len(rf.peers)
-		rf.mu.Unlock()
-		go func(total int) {
-			// start a new election
-			done_chan := make(chan int32, 4)
-			vote_chan := make(chan int32, 4)
-			var done int32 = 0
-			var vote int32 = 0
-			//log.Printf("[%v] start a new election. total=%v\n", rf.me, total)
-			for server := 0; server < n; server++ {
-				if server != me {
-					go rf.sendRequestVote(server, vote_chan, done_chan, currentTerm, me)
-				}
-			}
-			ok := false
-			for !ok {
-				select {
-				case dv := <-done_chan:
-					{
-						v := atomic.LoadInt32(&done)
-						v += dv
-						if v == int32(total) {
-							// election failed
-							return
-						}
-						atomic.StoreInt32(&done, v)
-					}
-
-				case vv := <-vote_chan:
-					{
-						v := atomic.LoadInt32(&vote)
-						v += vv
-						if v >= int32(total/2) {
-							ok = true
-							break
-						}
-						atomic.StoreInt32(&vote, v)
-					}
-				}
-			}
-
-			// if it wins the election, it begins to send heartbeat
-			// here it have required the mutex
-			rf.mu.Lock()
-			rf.state = LEADER
-			currentTerm = rf.currentTerm
-			for rf.state == LEADER && !rf.killed() {
-				rf.mu.Unlock()
-				group := sync.WaitGroup{}
-				group.Add(total - 1)
-				//log.Printf("[%v] leader send heartbeat\n", rf.me)
-				for server := 0; server < total; server++ {
-					if server != me {
-						go rf.sendAppendEntries(server, &group)
-					}
-				}
-				group.Wait()
-				time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
-				// re-acquire the mutex to check if it is still leader
-				rf.mu.Lock()
-			}
-			//log.Printf("\033[31m[%v] is no longer leader\033[0m\n", rf.me)
-			rf.mu.Unlock()
-		}(n)
+		go rf.election()
 	}
 	//log.Printf("\033[31m[%v] self suicide\033[0m\n", rf.me)
+}
+
+// Timeout and create an election.
+
+func (rf *Raft) election() {
+	// should call with lock!
+	rf.state = CANDIDATE
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	currentTerm := rf.currentTerm
+	me := rf.me
+	n := len(rf.peers)
+	rf.mu.Unlock()
+	// start a new election
+	done_chan := make(chan int32, 4)
+	vote_chan := make(chan int32, 4)
+	var done int32 = 0
+	var vote int32 = 0
+	//log.Printf("[%v] start a new election. total=%v\n", rf.me, total)
+	for server := 0; server < n; server++ {
+		if server != me {
+			go rf.sendRequestVote(server, vote_chan, done_chan, currentTerm, me)
+		}
+	}
+	ok := false
+	for !ok {
+		select {
+		case dv := <-done_chan:
+			{
+				v := atomic.LoadInt32(&done)
+				v += dv
+				if v == int32(n) {
+					// election failed
+					return
+				}
+				atomic.StoreInt32(&done, v)
+			}
+
+		case vv := <-vote_chan:
+			{
+				v := atomic.LoadInt32(&vote)
+				v += vv
+				if v >= int32(n/2) {
+					ok = true
+					break
+				}
+				atomic.StoreInt32(&vote, v)
+			}
+		}
+	}
+
+	// if it wins the election, it begins to send heartbeat
+	// here it have required the mutex
+	rf.mu.Lock()
+	rf.state = LEADER
+	currentTerm = rf.currentTerm
+	for rf.state == LEADER && !rf.killed() {
+		rf.mu.Unlock()
+		group := sync.WaitGroup{}
+		group.Add(n - 1)
+		//log.Printf("[%v] leader send heartbeat\n", rf.me)
+		for server := 0; server < n; server++ {
+			if server != me {
+				go rf.sendAppendEntries(server, &group)
+			}
+		}
+		group.Wait()
+		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
+		// re-acquire the mutex to check if it is still leader
+		rf.mu.Lock()
+	}
+	//log.Printf("\033[31m[%v] is no longer leader\033[0m\n", rf.me)
+	rf.mu.Unlock()
 }
 
 //
