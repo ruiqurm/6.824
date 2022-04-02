@@ -78,14 +78,23 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm int
-	votedFor    int
-	state       int8
-	// log		 []LogEntry
+	currentTerm  int
+	votedFor     int
+	state        int8
+	log          []LogEntry
 	electionFlag bool
+
+	// volatile state on all servers
+	commitIndex int
+	lastApplied int
+
+	// volatile state;for leader
+	nextIndex  []int
+	matchIndex []int
 }
 type LogEntry struct {
-	Term int
+	Term    int
+	Command interface{}
 }
 
 // return currentTerm and whether this server
@@ -200,19 +209,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.electionFlag = false // refresh timer
 	reply.Term = rf.currentTerm
-	reply.Success = true
-	rf.electionFlag = false
-	// if args.Term < rf.currentTerm {
-	// 	reply.Success = false
-	// 	return
-	// }
 	if args.Term > rf.currentTerm {
+		reply.Success = true
 		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
 		rf.votedFor = -1
+
+		// check log
+		// 	if len(rf.log) < args.PrevLogIndex {
+		// 		reply.Success = false
+		// 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// 		reply.Success = false
+		// 		// should discard the log entries before prevLogIndex
+		// 		rf.log = rf.log[:args.PrevLogIndex]
+		// 	} else {
+		// 		// have been synchronized with leader
+		// 		return
+		// 	}
+		// 	// if RPC carries log entries(not heartbeat), update log
+		// 	if len(args.Entries) > 0 {
+		// 		rf.log = append(rf.log, args.Entries...)
+		// 	}
+		// } else {
+		// 	reply.Success = false
 	}
-	//log.Printf("[%v] receive AppendEntries from %d", rf.me, args.LeaderId)
+	Log_debugf("[%v] receive AppendEntries from %d", rf.me, args.LeaderId)
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -229,7 +252,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.state == LEADER || rf.state == CANDIDATE {
 			rf.state = FOLLOWER
 		}
-		//log.Printf("[%v] receive from [%v],grant vote;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		Log_debugf("[%v] receive from [%v],grant vote;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		rf.votedFor = args.CandidateId
 		rf.currentTerm = args.Term // update term
 		reply.Term = rf.currentTerm
@@ -237,7 +260,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionFlag = false // refresh election timer
 	} else {
 		// otherwise, deny vote
-		//log.Printf("[%v] receive from [%v],reject;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		Log_debugf("[%v] receive from [%v],reject;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	}
@@ -306,13 +329,13 @@ func (rf *Raft) sendAppendEntries(server int, wg *sync.WaitGroup) {
 	rf.mu.Lock()
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
+
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
-	//log.Printf("[%v] send heartbeat to %v\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	if ok {
 		rf.mu.Lock()
-		//log.Printf("[%v] leader receive reply.Term=%v,self=%v\n", rf.me, rf.currentTerm, reply.Term)
+		Log_debugf("[%v] leader receive reply.Term=%v,self=%v\n", rf.me, rf.currentTerm, reply.Term)
 		if reply.Term > rf.currentTerm {
 			rf.state = FOLLOWER
 			rf.currentTerm = reply.Term
@@ -337,14 +360,15 @@ func (rf *Raft) sendAppendEntries(server int, wg *sync.WaitGroup) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
 	// Your code here (2B).
-
-	return index, term, isLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.commitIndex + 1, rf.currentTerm, rf.state == LEADER
 }
+
+// func (rf *Raft) log_replication() {
+// }
 
 //
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -365,15 +389,11 @@ func (rf *Raft) Kill() {
 	rf.votedFor = -1
 	rf.state = FOLLOWER
 	rf.electionFlag = true
-	//log.Printf("\033[31m[%v] be killed\n\033[0m", rf.me)
-	var wait_to_start_time int
-	if len(rf.peers)*HEARTBEAT_INTERVAL > 1000 {
-		wait_to_start_time = 1000
-	} else {
-		wait_to_start_time = len(rf.peers) * HEARTBEAT_INTERVAL
-	}
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	Log_debugf("[%v] be killed\n", rf.me)
 	rf.mu.Unlock()
-	time.Sleep(time.Duration(wait_to_start_time) * time.Millisecond)
+	// time.Sleep(time.Duration(1000) * time.Millisecond)
 }
 
 func (rf *Raft) killed() bool {
@@ -390,7 +410,6 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-
 		time.Sleep(time.Duration(rand.Int63()%(ELECTION_TIMEOUT_RANGE)+ELECTION_MIN_TIMEOUT) * time.Millisecond)
 		// after sleep, start a new election
 
@@ -400,14 +419,13 @@ func (rf *Raft) ticker() {
 			continue
 		}
 		if !rf.electionFlag {
-			//log.Printf("[%v] heartbeat verified\n", rf.me)
+			Log_debugf("[%v] heartbeat verified\n", rf.me)
 			rf.electionFlag = true
 			rf.mu.Unlock()
 			continue
 		}
 		go rf.election()
 	}
-	//log.Printf("\033[31m[%v] self suicide\033[0m\n", rf.me)
 }
 
 // Timeout and create an election.
@@ -426,7 +444,7 @@ func (rf *Raft) election() {
 	vote_chan := make(chan int32, 4)
 	var done int32 = 0
 	var vote int32 = 0
-	//log.Printf("[%v] start a new election. total=%v\n", rf.me, total)
+	Log_debugf("[%v] start a new election. total=%v\n", rf.me, n)
 	for server := 0; server < n; server++ {
 		if server != me {
 			go rf.sendRequestVote(server, vote_chan, done_chan, currentTerm, me)
@@ -463,12 +481,20 @@ func (rf *Raft) election() {
 	// here it have required the mutex
 	rf.mu.Lock()
 	rf.state = LEADER
-	currentTerm = rf.currentTerm
+	// currentTerm = rf.currentTerm
+	rf.mu.Unlock()
+	go rf.heartBeat()
+}
+
+func (rf *Raft) heartBeat() {
+	rf.mu.Lock()
+	me := rf.me
+	n := len(rf.peers)
 	for rf.state == LEADER && !rf.killed() {
 		rf.mu.Unlock()
 		group := sync.WaitGroup{}
 		group.Add(n - 1)
-		//log.Printf("[%v] leader send heartbeat\n", rf.me)
+		// log.Printf("[%v] leader send heartbeat\n", rf.me)
 		for server := 0; server < n; server++ {
 			if server != me {
 				go rf.sendAppendEntries(server, &group)
@@ -479,8 +505,8 @@ func (rf *Raft) election() {
 		// re-acquire the mutex to check if it is still leader
 		rf.mu.Lock()
 	}
-	//log.Printf("\033[31m[%v] is no longer leader\033[0m\n", rf.me)
 	rf.mu.Unlock()
+	// log.Printf("\033[31m[%v] is no longer leader\033[0m\n", rf.me)
 }
 
 //
@@ -502,11 +528,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rand.Seed(time.Now().UnixNano())
 	rf.currentTerm = 0
 	rf.votedFor = me
 	rf.state = FOLLOWER
 	rf.electionFlag = true
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
