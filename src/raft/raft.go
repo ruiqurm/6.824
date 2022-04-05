@@ -91,6 +91,7 @@ type Raft struct {
 	// volatile state;for leader
 	nextIndex  []int
 	matchIndex []int
+	applyCh    chan ApplyMsg
 }
 type LogEntry struct {
 	Term    int
@@ -218,24 +219,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 
 		// check log
-		// 	if len(rf.log) < args.PrevLogIndex {
-		// 		reply.Success = false
-		// 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// 		reply.Success = false
-		// 		// should discard the log entries before prevLogIndex
-		// 		rf.log = rf.log[:args.PrevLogIndex]
-		// 	} else {
-		// 		// have been synchronized with leader
-		// 		return
-		// 	}
-		// 	// if RPC carries log entries(not heartbeat), update log
-		// 	if len(args.Entries) > 0 {
-		// 		rf.log = append(rf.log, args.Entries...)
-		// 	}
-		// } else {
-		// 	reply.Success = false
+		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
+		if len(rf.log) < prev_index {
+			reply.Success = false
+			Log_debugf("[%v] receive AE from %d,failed,len(rf.log) < prev_index", rf.me, args.LeaderId)
+
+		} else if prev_index > 0 && rf.log[prev_index-1].Term != args.PrevLogTerm {
+			reply.Success = false
+			// should discard the log entries before prevLogIndex
+			rf.log = rf.log[:args.PrevLogIndex]
+			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v", rf.me, args.LeaderId, prev_index, rf.log[prev_index-1].Term, args.PrevLogTerm, len(rf.log))
+
+		} else {
+			// have been synchronized with leader
+			if len(args.Entries) > 0 && prev_index == len(rf.log) {
+				rf.log = append(rf.log, args.Entries...)
+			}
+			Log_debugf("[%v] receive AE from %d,succ,len(log)=%v", rf.me, args.LeaderId, len(rf.log))
+		}
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(len(rf.log), args.LeaderCommit)
+		}
+		Log_debugf("[%v] commitIndex=%v", rf.me, rf.commitIndex)
+
+		if rf.commitIndex > rf.lastApplied {
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[i-1].Command,
+					CommandIndex: i,
+				}
+				rf.applyCh <- msg
+			}
+			rf.lastApplied = rf.commitIndex
+		}
+	} else {
+		reply.Success = false
+		Log_debugf("[%v] receive AE from %d,failed", rf.me, args.LeaderId)
 	}
-	Log_debugf("[%v] receive AE from %d", rf.me, args.LeaderId)
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -336,23 +357,75 @@ func (rf *Raft) sendRequestVote(server int, vote chan int32, done chan int32, cu
 }
 
 func (rf *Raft) sendAppendEntries(server int) {
+	var index_to_append int
 	args := AppendEntriesArgs{}
 	rf.mu.Lock()
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
+	args.LeaderCommit = rf.commitIndex
 
+	prev_index := rf.nextIndex[server] - 1
+	lastest_log_index := len(rf.log)
+	if prev_index != 0 {
+		// special judge if next_index is 0
+		args.PrevLogTerm = rf.log[prev_index-1].Term
+		args.PrevLogIndex = prev_index
+		index_to_append = prev_index // prev_index + 1 -1
+	} else {
+		args.PrevLogTerm = 0
+		args.PrevLogIndex = 0
+		index_to_append = 0
+	}
+	if lastest_log_index > prev_index {
+		// If follower does not have latest entries, send to them
+		// For simplicity, we just send one log per time
+		// Note here is "next index",so "equal" should include
+		args.Entries = append(args.Entries, rf.log[index_to_append])
+	}
+	Log_debugf("[%v] send AE to %v,PrevLogIndex=%v,PrevLogTerm=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries) != 0)
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
-	// Log_debugf("[%v] send AE to %v,\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	if ok {
 		rf.mu.Lock()
-		Log_debugf("[%v] AE received.Term=%v,self=%v\n", rf.me, rf.currentTerm, reply.Term)
+		defer rf.mu.Unlock()
 		if reply.Term > rf.currentTerm {
 			rf.state = FOLLOWER
 			rf.currentTerm = reply.Term
+			return
 		}
-		rf.mu.Unlock()
+		if reply.Success {
+			// If successful: update nextIndex and matchIndex for follower
+			if len(args.Entries) > 0 {
+				rf.matchIndex[server] = prev_index + 1
+				rf.nextIndex[server]++
+			} else {
+				rf.matchIndex[server] = prev_index
+			}
+		} else {
+			rf.nextIndex[server]--
+		}
+
+		// scan matchIndex and update commitIndex
+		for i := rf.commitIndex + 1; i <= len(rf.log); i++ {
+			count := 1
+			for j := 0; j < len(rf.peers); j++ {
+				if rf.matchIndex[j] >= i && j != rf.me {
+					count++
+				}
+				if count > len(rf.peers)/2 {
+					rf.commitIndex = i // commited successfully
+					break
+				}
+			}
+			if rf.commitIndex != i {
+				break
+			}
+		}
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied = rf.commitIndex
+		}
+		Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
 	}
 	// wg.Done()
 }
@@ -376,11 +449,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.commitIndex + 1, rf.currentTerm, rf.state == LEADER
-}
-
-func (rf *Raft) log_replication() {
-
+	if rf.state == LEADER {
+		rf.log = append(rf.log, LogEntry{rf.currentTerm, command})
+		Log_infof("[%v] log append,len=%v\n", rf.me, len(rf.log))
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: len(rf.log)}
+	}
+	return len(rf.log), rf.currentTerm, rf.state == LEADER
 }
 
 //
@@ -415,6 +489,7 @@ func (rf *Raft) Kill() {
 	rf.electionFlag = true
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.log = make([]LogEntry, 0)
 	// time.Sleep(time.Duration(1000) * time.Millisecond)
 }
 
@@ -506,6 +581,12 @@ func (rf *Raft) election() {
 	rf.mu.Lock()
 	rf.state = LEADER
 	rf.votedFor = -1
+	rf.nextIndex = make([]int, n)
+	rf.matchIndex = make([]int, n)
+	for i := 0; i < n; i++ {
+		rf.nextIndex[i] = len(rf.log) + 1 // leader last log index + 1
+		rf.matchIndex[i] = 0
+	}
 	// currentTerm = rf.currentTerm
 	rf.mu.Unlock()
 	go rf.heartBeat()
@@ -560,11 +641,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionFlag = true
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.log = make([]LogEntry, 0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.applyCh = applyCh
+	SetLevel(WarnLevel)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
 	return rf
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
