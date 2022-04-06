@@ -253,6 +253,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			rf.lastApplied = rf.commitIndex
 		}
+		Log_debugf("[%v] last_applied = %v", rf.me, rf.lastApplied)
 	} else {
 		reply.Success = false
 		Log_debugf("[%v] receive AE from %d,failed", rf.me, args.LeaderId)
@@ -408,22 +409,26 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 		// scan matchIndex and update commitIndex
 		for i := rf.commitIndex + 1; i <= len(rf.log); i++ {
-			count := 1
+			count := 0
 			for j := 0; j < len(rf.peers); j++ {
 				if rf.matchIndex[j] >= i && j != rf.me {
 					count++
 				}
-				if count > len(rf.peers)/2 {
+				if count >= len(rf.peers)/2 {
 					rf.commitIndex = i // commited successfully
+					msg := ApplyMsg{
+						CommandValid: true,
+						Command:      rf.log[i-1].Command,
+						CommandIndex: i,
+					}
+					rf.applyCh <- msg
+					rf.lastApplied = i
 					break
 				}
 			}
 			if rf.commitIndex != i {
 				break
 			}
-		}
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied = rf.commitIndex
 		}
 		Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
 	}
@@ -452,7 +457,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == LEADER {
 		rf.log = append(rf.log, LogEntry{rf.currentTerm, command})
 		Log_infof("[%v] log append,len=%v\n", rf.me, len(rf.log))
-		rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex: len(rf.log)}
 	}
 	return len(rf.log), rf.currentTerm, rf.state == LEADER
 }
