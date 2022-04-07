@@ -388,16 +388,12 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		rf.mu.Lock()
-		if rf.state == LEADER {
-			rf.setElectionTime()
-			rf.heartBeat()
-		}
 		if time.Now().After(rf.electionTime) {
 			rf.setElectionTime()
 			rf.election()
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		time.Sleep(time.Duration(WAKE_UP_INTERVAL) * time.Millisecond)
 	}
 }
 
@@ -443,7 +439,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.applyCh = applyCh
-	// SetLevel(WarnLevel)
+	SetLevel(WarnLevel)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	return rf

@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -55,16 +56,33 @@ func (rf *Raft) election() {
 	Log_debugf("[%v] start a new election. total=%v,curTerm=%v\n", rf.me, n, rf.currentTerm)
 	// start a new election
 	var vote int = 0
+	var done int = 1
+	cond := sync.Cond{L: &sync.Mutex{}}
 	for server := 0; server < n; server++ {
 		if server != me {
-			go rf.sendRequestVote(server, &args, &vote)
+			go rf.sendRequestVote(server, &args, &vote, &done, &cond)
 		}
 	}
-	// go rf.heartBeat()
+	go rf.leaderLoop(&cond)
 	// go rf.log_replication()
 }
 
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int) {
+func (rf *Raft) leaderLoop(cond *sync.Cond) {
+	cond.L.Lock()
+	cond.Wait()
+	cond.L.Unlock()
+	rf.mu.Lock()
+	for rf.state == LEADER && !rf.killed() {
+		rf.setElectionTime()
+		rf.heartBeat()
+		rf.mu.Unlock()
+		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
+		rf.mu.Lock()
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, done *int, cond *sync.Cond) {
 	reply := RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
 	rf.mu.Lock()
@@ -80,8 +98,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int) {
 			if *vote >= len(rf.peers)/2 {
 				fmt.Println("[", rf.me, "]", "become leader vote=", *vote)
 				rf.asLeader()
+				cond.Broadcast()
 			}
 		}
+	}
+	*done += 1
+	if *done == len(rf.peers) {
+		cond.Broadcast()
 	}
 }
 
