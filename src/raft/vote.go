@@ -50,10 +50,10 @@ func (rf *Raft) election() {
 		args.LastLogIndex = 0
 		args.LastLogTerm = 0
 	} else {
-		args.LastLogIndex = len(rf.log) - 1
+		args.LastLogIndex = len(rf.log)
 		args.LastLogTerm = rf.log[len(rf.log)-1].Term
 	}
-	Log_debugf("[%v] start a new election. total=%v,curTerm=%v\n", rf.me, n, rf.currentTerm)
+	Log_debugf("[%v] start a new election. total=%v,curTerm=%v,lastLogIndex=%v,lastLogTerm=%v,\n", rf.me, n, rf.currentTerm, args.LastLogIndex, args.LastLogTerm)
 	// start a new election
 	var vote int = 0
 	var done int = 1
@@ -132,9 +132,9 @@ func (rf *Raft) sendAppendEntries(server int) {
 		// If follower does not have latest entries, send to them
 		// For simplicity, we just send one log per time
 		// Note here is "next index",so "equal" should include
-		args.Entries = append(args.Entries, rf.log[index_to_append])
+		args.Entries = append(args.Entries, rf.log[index_to_append:]...)
 	}
-	Log_debugf("[%v] send AE to %v,PrevLogIndex=%v,PrevLogTerm=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries) != 0)
+	Log_debugf("[%v] send AE to %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
@@ -148,15 +148,14 @@ func (rf *Raft) sendAppendEntries(server int) {
 		if reply.Success {
 			// If successful: update nextIndex and matchIndex for follower
 			if len(args.Entries) > 0 {
-				rf.matchIndex[server] = prev_index + 1
-				rf.nextIndex[server]++
+				rf.matchIndex[server] = prev_index + len(args.Entries)
+				rf.nextIndex[server] = rf.matchIndex[server] + 1
 			} else {
 				rf.matchIndex[server] = prev_index
 			}
 		} else {
 			rf.nextIndex[server]--
 		}
-
 		// scan matchIndex and update commitIndex
 		for i := rf.commitIndex + 1; i <= len(rf.log); i++ {
 			count := 0
@@ -171,6 +170,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 						Command:      rf.log[i-1].Command,
 						CommandIndex: i,
 					}
+					Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log[i-1].Term, rf.log[i-1].Command)
 					rf.applyCh <- msg
 					rf.lastApplied = i
 					break

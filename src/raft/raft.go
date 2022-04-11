@@ -209,6 +209,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+
 	rf.setElectionTime() // refresh timer
 	reply.Term = rf.currentTerm
 	if args.Term >= rf.currentTerm {
@@ -221,15 +222,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.log) < prev_index {
 			reply.Success = false
 			Log_debugf("[%v] receive AE from %d,failed,len(rf.log) < prev_index", rf.me, args.LeaderId)
+			return
+		}
 
-		} else if prev_index > 0 && rf.log[prev_index-1].Term != args.PrevLogTerm {
-			reply.Success = false
+		if prev_index > 0 && rf.log[prev_index-1].Term != args.PrevLogTerm {
 			// should discard the log entries before prevLogIndex
-			rf.log = rf.log[:args.PrevLogIndex]
 			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v", rf.me, args.LeaderId, prev_index, rf.log[prev_index-1].Term, args.PrevLogTerm, len(rf.log))
+			reply.Success = false
+			rf.log = rf.log[:prev_index-1]
 
 		} else {
 			// have been synchronized with leader
+			rf.log = rf.log[:prev_index]
 			if len(args.Entries) > 0 && prev_index == len(rf.log) {
 				rf.log = append(rf.log, args.Entries...)
 			}
@@ -238,14 +242,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(len(rf.log), args.LeaderCommit)
 		}
-
-		if rf.commitIndex > rf.lastApplied {
+		if reply.Success && rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				msg := ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log[i-1].Command,
 					CommandIndex: i,
 				}
+				Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log[i-1].Term, rf.log[i-1].Command)
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
@@ -265,22 +269,38 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	var lastLogTerm int
+	n := len(rf.log)
+	if n == 0 {
+		lastLogTerm = 0
+	} else {
+		lastLogTerm = rf.log[n-1].Term
+	}
+
 	reply.Term = rf.currentTerm
 	rf.setElectionTime()
 	if args.Term > rf.currentTerm {
 		rf.asFollower(args.Term)
 		rf.votedFor = -1
 	}
+
 	if args.Term < rf.currentTerm {
 		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, rf.currentTerm)
 		reply.VoteGranted = false
 		return
-	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && args.LastLogIndex >= len(rf.log) {
+	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && // not voted for anyone or voted for the candidate
+		((args.LastLogIndex >= n || lastLogTerm != args.LastLogTerm) && (args.LastLogTerm >= lastLogTerm)) {
 		Log_debugf("[%v] receive from [%v],grant vote\n", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
-		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, rf.currentTerm)
+		var term int
+		if n == 0 {
+			term = 0
+		} else {
+			term = rf.log[n-1].Term
+		}
+		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
 		reply.VoteGranted = false
 	}
 
@@ -358,16 +378,6 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// var state string
-	// if rf.state == LEADER {
-	// 	state = "LEADER"
-	// } else if rf.state == CANDIDATE {
-	// 	state = "CANDIDATE"
-	// } else {
-	// 	state = "FOLLOWER"
-	// }
-
-	// Log_debugf("[%v](%v) be killed.\n", rf.me, state)
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = FOLLOWER
