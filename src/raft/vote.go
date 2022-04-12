@@ -27,7 +27,7 @@ func (rf *Raft) asLeader() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.backoff = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = len(rf.log) + 1 // leader last log index + 1
+		rf.nextIndex[i] = rf.log.LatestIndex() + 1 // leader last log index + 1
 		rf.matchIndex[i] = 0
 		rf.backoff[i] = 1
 	}
@@ -48,13 +48,8 @@ func (rf *Raft) election() {
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = me
-	if len(rf.log) == 0 {
-		args.LastLogIndex = 0
-		args.LastLogTerm = 0
-	} else {
-		args.LastLogIndex = len(rf.log)
-		args.LastLogTerm = rf.log[len(rf.log)-1].Term
-	}
+	args.LastLogIndex = rf.log.LatestIndex()
+	args.LastLogTerm = rf.log.LatestTerm()
 	Log_debugf("[%v] start a new election. total=%v,curTerm=%v,lastLogIndex=%v,lastLogTerm=%v,\n", rf.me, n, rf.currentTerm, args.LastLogIndex, args.LastLogTerm)
 	// start a new election
 	var vote int = 0
@@ -112,29 +107,19 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 
 func (rf *Raft) sendAppendEntries(server int) {
 	rf.mu.Lock()
-	var index_to_append int
 	args := AppendEntriesArgs{}
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.LeaderCommit = rf.commitIndex
 
 	prev_index := rf.nextIndex[server] - 1
-	lastest_log_index := len(rf.log)
-	if prev_index != 0 {
-		// special judge if next_index is 0
-		args.PrevLogTerm = rf.log[prev_index-1].Term
-		args.PrevLogIndex = prev_index
-		index_to_append = prev_index // prev_index + 1 -1
-	} else {
-		args.PrevLogTerm = 0
-		args.PrevLogIndex = 0
-		index_to_append = 0
-	}
-	if lastest_log_index > prev_index {
+	args.PrevLogTerm = rf.log.GetTerm(prev_index)
+	args.PrevLogIndex = prev_index
+	if rf.log.LatestIndex() > prev_index {
 		// If follower does not have latest entries, send to them
 		// For simplicity, we just send one log per time
 		// Note here is "next index",so "equal" should include
-		args.Entries = append(args.Entries, rf.log[index_to_append:]...)
+		args.Entries = append(args.Entries, rf.log.GetMany(rf.nextIndex[server])...)
 	}
 	Log_debugf("[%v] send AE to %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
 	rf.mu.Unlock()
@@ -171,7 +156,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			}
 		}
 		// scan matchIndex and update commitIndex
-		for i := rf.commitIndex + 1; i <= len(rf.log); i++ {
+		for i := rf.commitIndex + 1; i <= rf.log.LatestIndex(); i++ {
 			count := 0
 			for j := 0; j < len(rf.peers); j++ {
 				if rf.matchIndex[j] >= i && j != rf.me {
@@ -181,10 +166,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 					rf.commitIndex = i // commited successfully
 					msg := ApplyMsg{
 						CommandValid: true,
-						Command:      rf.log[i-1].Command,
+						Command:      rf.log.Get(i).Command,
 						CommandIndex: i,
 					}
-					Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log[i-1].Term, rf.log[i-1].Command)
+					Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log.Get(i).Term, rf.log.Get(i).Command)
 					rf.applyCh <- msg
 					rf.lastApplied = i
 					break

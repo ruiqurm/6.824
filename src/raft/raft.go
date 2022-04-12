@@ -80,7 +80,7 @@ type Raft struct {
 	currentTerm  int
 	votedFor     int
 	state        int8
-	log          []LogEntry
+	log          *Log
 	electionTime time.Time
 
 	// volatile state on all servers
@@ -92,10 +92,6 @@ type Raft struct {
 	backoff    []int //exponential backoff
 	matchIndex []int
 	applyCh    chan ApplyMsg
-}
-type LogEntry struct {
-	Term    int
-	Command interface{}
 }
 
 // return currentTerm and whether this server
@@ -220,37 +216,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// check log
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
-		if len(rf.log) < prev_index {
+		if rf.log.LatestIndex() < prev_index {
 			reply.Success = false
 			Log_debugf("[%v] receive AE from %d,failed,len(rf.log) < prev_index", rf.me, args.LeaderId)
 			return
 		}
 
-		if prev_index > 0 && rf.log[prev_index-1].Term != args.PrevLogTerm {
+		if prev_index > 0 && rf.log.GetTerm(prev_index) != args.PrevLogTerm {
 			// should discard the log entries before prevLogIndex
-			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v", rf.me, args.LeaderId, prev_index, rf.log[prev_index-1].Term, args.PrevLogTerm, len(rf.log))
+			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v", rf.me, args.LeaderId, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len())
 			reply.Success = false
-			rf.log = rf.log[:prev_index-1]
-
+			rf.log.Cut(prev_index)
 		} else {
 			// have been synchronized with leader
-			rf.log = rf.log[:prev_index]
-			if len(args.Entries) > 0 && prev_index == len(rf.log) {
-				rf.log = append(rf.log, args.Entries...)
+			rf.log.Cut(prev_index + 1)
+			if len(args.Entries) > 0 && prev_index == rf.log.LatestIndex() {
+				rf.log.Append(args.Entries...)
 			}
-			Log_debugf("[%v] receive AE from %d,succ,len(log)=%v", rf.me, args.LeaderId, len(rf.log))
+			Log_debugf("[%v] receive AE from %d,succ,len(log)=%v", rf.me, args.LeaderId, rf.log.Len())
 		}
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(len(rf.log), args.LeaderCommit)
+			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
 		}
 		if reply.Success && rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				msg := ApplyMsg{
 					CommandValid: true,
-					Command:      rf.log[i-1].Command,
+					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log[i-1].Term, rf.log[i-1].Command)
+				Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log.Get(i).Term, rf.log.Get(i).Command)
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
@@ -270,13 +265,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	var lastLogTerm int
-	n := len(rf.log)
-	if n == 0 {
-		lastLogTerm = 0
-	} else {
-		lastLogTerm = rf.log[n-1].Term
-	}
+	n := rf.log.LatestIndex()
+	lastLogTerm := rf.log.LatestTerm()
 
 	reply.Term = rf.currentTerm
 	rf.setElectionTime()
@@ -299,7 +289,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if n == 0 {
 			term = 0
 		} else {
-			term = rf.log[n-1].Term
+			term = rf.log.Get(n).Term
 		}
 		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
 		reply.VoteGranted = false
@@ -357,10 +347,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state == LEADER {
-		rf.log = append(rf.log, LogEntry{rf.currentTerm, command})
-		Log_infof("[%v] log append,len=%v\n", rf.me, len(rf.log))
+		rf.log.Append(LogEntry{rf.currentTerm, command})
+		Log_infof("[%v] log append,len=%v\n", rf.me, rf.log.Len())
 	}
-	return len(rf.log), rf.currentTerm, rf.state == LEADER
+	return rf.log.Len(), rf.currentTerm, rf.state == LEADER
 }
 
 //
@@ -385,7 +375,7 @@ func (rf *Raft) Kill() {
 	rf.setElectionTime()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.log = make([]LogEntry, 0)
+	rf.log = NewLog()
 	// time.Sleep(time.Duration(1000) * time.Millisecond)
 }
 
@@ -446,7 +436,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.log = make([]LogEntry, 0)
+	rf.log = NewLog()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.applyCh = applyCh
