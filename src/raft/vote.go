@@ -25,9 +25,11 @@ func (rf *Raft) asLeader() {
 	rf.votedFor = rf.me
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.backoff = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = len(rf.log) + 1 // leader last log index + 1
 		rf.matchIndex[i] = 0
+		rf.backoff[i] = 1
 	}
 }
 
@@ -153,8 +155,20 @@ func (rf *Raft) sendAppendEntries(server int) {
 			} else {
 				rf.matchIndex[server] = prev_index
 			}
+			rf.backoff[server] = 1
 		} else {
-			rf.nextIndex[server]--
+			// linear backoff
+			// rf.nextIndex[server]--
+			// exponential backoff
+			if rf.backoff[server] < 1024 {
+				rf.backoff[server] <<= 1
+			}
+			next_backoff := rf.nextIndex[server] - rf.backoff[server]
+			if next_backoff < 1 {
+				rf.nextIndex[server] = 1
+			} else {
+				rf.nextIndex[server] = next_backoff
+			}
 		}
 		// scan matchIndex and update commitIndex
 		for i := rf.commitIndex + 1; i <= len(rf.log); i++ {

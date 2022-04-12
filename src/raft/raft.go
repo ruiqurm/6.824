@@ -89,6 +89,7 @@ type Raft struct {
 
 	// volatile state;for leader
 	nextIndex  []int
+	backoff    []int //exponential backoff
 	matchIndex []int
 	applyCh    chan ApplyMsg
 }

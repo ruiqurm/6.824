@@ -24,9 +24,9 @@ const (
 )
 
 var (
-	debugLog = log.New(os.Stdout, "\033[36m[debug]\033[0m ", log.LstdFlags|log.Lmicroseconds|log.Lshortfile)
-	infoLog  = log.New(os.Stdout, "\033[34m[info ]\033[0m ", log.LstdFlags|log.Lshortfile)
-	warnLog  = log.New(os.Stdout, "\033[31m[warn ]\033[0m ", log.LstdFlags|log.Lshortfile)
+	debugLog = log.New(os.Stdout, "\033[36m[debug]\033[0m ", log.LstdFlags|log.Lmicroseconds)
+	infoLog  = log.New(os.Stdout, "\033[34m[info ]\033[0m ", log.LstdFlags|log.Lmicroseconds)
+	warnLog  = log.New(os.Stdout, "\033[31m[warn ]\033[0m ", log.LstdFlags|log.Lmicroseconds)
 	loggers  = []*log.Logger{debugLog, infoLog, warnLog}
 	mu       sync.Mutex
 )
