@@ -207,11 +207,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.setElectionTime() // refresh timer
+	rf.setElectionTimeL() // refresh timer
 	reply.Term = rf.currentTerm
 	if args.Term >= rf.currentTerm {
 		reply.Success = true
-		rf.asFollower(args.Term)
+		rf.asFollowerL(args.Term)
 		rf.votedFor = args.LeaderId
 
 		// check log
@@ -269,9 +269,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogTerm := rf.log.LatestTerm()
 
 	reply.Term = rf.currentTerm
-	rf.setElectionTime()
+	rf.setElectionTimeL()
 	if args.Term > rf.currentTerm {
-		rf.asFollower(args.Term)
+		rf.asFollowerL(args.Term)
 		rf.votedFor = -1
 	}
 
@@ -372,7 +372,7 @@ func (rf *Raft) Kill() {
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = FOLLOWER
-	rf.setElectionTime()
+	rf.setElectionTimeL()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.log = NewLog()
@@ -390,8 +390,8 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		if time.Now().After(rf.electionTime) {
-			rf.setElectionTime()
-			rf.election()
+			rf.setElectionTimeL()
+			rf.electionL()
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(WAKE_UP_INTERVAL) * time.Millisecond)
@@ -430,7 +430,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
-	rf.setElectionTime()
+	rf.setElectionTimeL()
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.state = FOLLOWER

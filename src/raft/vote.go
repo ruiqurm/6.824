@@ -1,26 +1,27 @@
 package raft
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
 )
 
-func (rf *Raft) setElectionTime() {
-	// should acquire lock
+func (rf *Raft) setElectionTimeL() {
+	// set next election time
+	// range in [ELECTION_MIN_TIMEOUT,ELECTION_MIN_TIMEOUT+ELECTION_TIMEOUT_RANGE]
 	rf.electionTime = time.Now().Add(time.Duration(rand.Int63()%(ELECTION_TIMEOUT_RANGE)+ELECTION_MIN_TIMEOUT) * time.Millisecond)
 }
 
-func (rf *Raft) asCandidate() {
-	// should call with lock!
+func (rf *Raft) asCandidateL() {
+	// set node state to `Candidate` and increase currentTerm
+	// call by `ElectionL`
 	rf.state = CANDIDATE
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 }
 
-func (rf *Raft) asLeader() {
-	// should call with lock!
+func (rf *Raft) asLeaderL() {
+	// set state as `Leader` and initialize leader internal variables
 	rf.state = LEADER
 	rf.votedFor = rf.me
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -33,16 +34,17 @@ func (rf *Raft) asLeader() {
 	}
 }
 
-func (rf *Raft) asFollower(term int) {
-	// should call with lock!
+func (rf *Raft) asFollowerL(term int) {
+	// Set state as `Follower` and reset currentTerm
+	// Here we don't reset votedFor, because it may vote
+	// for another candidate immediately after this function
 	rf.state = FOLLOWER
 	rf.currentTerm = term
 }
 
-// if timeout, start an election
-func (rf *Raft) election() {
-	// should call with lock!
-	rf.asCandidate()
+func (rf *Raft) electionL() {
+	// if timeout, start an election
+	rf.asCandidateL()
 	me := rf.me
 	n := len(rf.peers)
 	args := RequestVoteArgs{}
@@ -61,7 +63,6 @@ func (rf *Raft) election() {
 		}
 	}
 	go rf.leaderLoop(&cond)
-	// go rf.log_replication()
 }
 
 func (rf *Raft) leaderLoop(cond *sync.Cond) {
@@ -69,8 +70,10 @@ func (rf *Raft) leaderLoop(cond *sync.Cond) {
 	cond.Wait()
 	cond.L.Unlock()
 	rf.mu.Lock()
+	// wake up when candidate wins or fails the election
 	for rf.state == LEADER && !rf.killed() {
-		rf.setElectionTime()
+		rf.setElectionTimeL()
+		// send heartbeats to all followers per HEARTBEAT_INTERVAL(100ms)
 		rf.heartBeat()
 		rf.mu.Unlock()
 		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
@@ -80,8 +83,11 @@ func (rf *Raft) leaderLoop(cond *sync.Cond) {
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, done *int, cond *sync.Cond) {
+	// send RequestVote RPC to a server
+	// `args` have been filled by main thread
 	reply := RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	// only when main thread give up lock, we can start to process reply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state != CANDIDATE {
@@ -89,12 +95,14 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 	}
 	if ok {
 		if reply.Term > rf.currentTerm {
-			rf.asFollower(reply.Term)
+			// if reply term is larger than current term,update current term
+			rf.asFollowerL(reply.Term)
 		} else if reply.VoteGranted {
 			*vote += 1
 			if *vote >= len(rf.peers)/2 {
-				fmt.Println("[", rf.me, "]", "become leader vote=", *vote)
-				rf.asLeader()
+				// win the elction
+				Log_infof("[%v] become leader vote=%v", rf.me, *vote)
+				rf.asLeaderL()
 				cond.Broadcast()
 			}
 		}
@@ -106,6 +114,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 }
 
 func (rf *Raft) sendAppendEntries(server int) {
+	// send AppendEntries RPC to a server
 	rf.mu.Lock()
 	args := AppendEntriesArgs{}
 	args.Term = rf.currentTerm
@@ -129,7 +138,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if reply.Term > rf.currentTerm {
-			rf.asFollower(reply.Term)
+			rf.asFollowerL(reply.Term)
 			return
 		}
 		if reply.Success {
@@ -144,7 +153,8 @@ func (rf *Raft) sendAppendEntries(server int) {
 		} else {
 			// linear backoff
 			// rf.nextIndex[server]--
-			// exponential backoff
+
+			// using exponential backoff
 			if rf.backoff[server] < 1024 {
 				rf.backoff[server] <<= 1
 			}
