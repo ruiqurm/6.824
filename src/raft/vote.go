@@ -78,6 +78,7 @@ func (rf *Raft) leaderLoop(cond *sync.Cond) {
 		rf.mu.Unlock()
 		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 		rf.mu.Lock()
+		// rf.update()
 	}
 	rf.mu.Unlock()
 }
@@ -155,7 +156,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// rf.nextIndex[server]--
 
 			// using exponential backoff
-			if rf.backoff[server] < 1024 {
+			if rf.backoff[server] < MAX_LOG_PER_REQUEST {
 				rf.backoff[server] <<= 1
 			}
 			next_backoff := rf.nextIndex[server] - rf.backoff[server]
@@ -165,30 +166,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 				rf.nextIndex[server] = next_backoff
 			}
 		}
-		// scan matchIndex and update commitIndex
-		for i := rf.commitIndex + 1; i <= rf.log.LatestIndex(); i++ {
-			count := 0
-			for j := 0; j < len(rf.peers); j++ {
-				if rf.matchIndex[j] >= i && j != rf.me {
-					count++
-				}
-				if count >= len(rf.peers)/2 {
-					rf.commitIndex = i // commited successfully
-					msg := ApplyMsg{
-						CommandValid: true,
-						Command:      rf.log.Get(i).Command,
-						CommandIndex: i,
-					}
-					Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log.Get(i).Term, rf.log.Get(i).Command)
-					rf.applyCh <- msg
-					rf.lastApplied = i
-					break
-				}
-			}
-			if rf.commitIndex != i {
-				break
-			}
-		}
+		rf.update()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
 	}
 	// wg.Done()
