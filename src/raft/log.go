@@ -43,7 +43,9 @@ func (l *Log) LatestIndex() int {
 }
 
 func (l *Log) Cut(index int) {
-	l.log = l.log[:index-1]
+	if index <= len(l.log) {
+		l.log = l.log[:index-1]
+	}
 }
 
 func (l *Log) Append(e ...LogEntry) {

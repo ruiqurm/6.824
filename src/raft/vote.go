@@ -26,11 +26,11 @@ func (rf *Raft) asLeaderL() {
 	rf.votedFor = rf.me
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.backoff = make([]int, len(rf.peers))
+	// rf.backoff = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = rf.log.LatestIndex() + 1 // leader last log index + 1
 		rf.matchIndex[i] = 0
-		rf.backoff[i] = 1
+		// rf.backoff[i] = 1
 	}
 }
 
@@ -150,21 +150,22 @@ func (rf *Raft) sendAppendEntries(server int) {
 			} else {
 				rf.matchIndex[server] = prev_index
 			}
-			rf.backoff[server] = 1
+			// rf.backoff[server] = 1
 		} else {
 			// linear backoff
 			// rf.nextIndex[server]--
 
 			// using exponential backoff
-			if rf.backoff[server] < MAX_LOG_PER_REQUEST {
-				rf.backoff[server] <<= 1
-			}
-			next_backoff := rf.nextIndex[server] - rf.backoff[server]
-			if next_backoff < 1 {
-				rf.nextIndex[server] = 1
-			} else {
-				rf.nextIndex[server] = next_backoff
-			}
+			// if rf.backoff[server] < MAX_LOG_PER_REQUEST {
+			// 	rf.backoff[server] <<= 1
+			// }
+			// next_backoff := rf.nextIndex[server] - rf.backoff[server]
+			// if next_backoff < 1 {
+			// 	rf.nextIndex[server] = 1
+			// } else {
+			// 	rf.nextIndex[server] = next_backoff
+			// }
+			rf.nextIndex[server] = reply.XIndex
 		}
 		rf.update()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)

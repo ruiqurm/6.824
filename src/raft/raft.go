@@ -197,6 +197,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	// XTerm   int // collision term
+	XIndex int // first log index which term equals to collision term
+	// XLen    int // distance of real next index and now index
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -219,15 +222,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
 		if rf.log.LatestIndex() < prev_index {
 			reply.Success = false
+			// reply.XTerm = -1
+			reply.XIndex = rf.log.LatestIndex() + 1
 			Log_debugf("[%v] receive AE from %d,failed,len(rf.log) < prev_index", rf.me, args.LeaderId)
 			return
 		}
 
 		if prev_index > 0 && rf.log.GetTerm(prev_index) != args.PrevLogTerm {
 			// should discard the log entries before prevLogIndex
-			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v", rf.me, args.LeaderId, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len())
+			// reply.XTerm = rf.log.GetTerm(prev_index)
+			idx := prev_index
+			for ; idx > 0; idx-- {
+				if rf.log.GetTerm(idx) != rf.log.GetTerm(prev_index) {
+					break
+				}
+			}
+			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", rf.me, args.LeaderId, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
+			reply.XIndex = idx + 1
 			reply.Success = false
-			rf.log.Cut(prev_index)
+			rf.log.Cut(reply.XIndex)
 		} else {
 			// have been synchronized with leader
 			rf.log.Cut(prev_index + 1)
