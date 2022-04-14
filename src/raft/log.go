@@ -9,10 +9,15 @@ type LogEntry struct {
 	Command interface{}
 }
 
+func (l *Log) GetLog() []LogEntry {
+	return l.log
+}
 func NewLog() *Log {
 	return &Log{[]LogEntry{}}
 }
-
+func RecoverLog(logs []LogEntry) *Log {
+	return &Log{log: logs}
+}
 func (l *Log) Len() int {
 	return len(l.log)
 }
@@ -75,7 +80,7 @@ func (rf *Raft) updateL() {
 					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				rf.Log_infofL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
+				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				rf.applyCh <- msg
 				rf.lastApplied = i
 				break

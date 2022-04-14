@@ -52,6 +52,7 @@ func (rf *Raft) electionL() {
 	args.CandidateId = me
 	args.LastLogIndex = rf.log.LatestIndex()
 	args.LastLogTerm = rf.log.LatestTerm()
+	rf.persistL()
 	rf.Log_debugfL("start a new election. total=%v,lastLogIndex=%v,lastLogTerm=%v,\n", n, args.LastLogIndex, args.LastLogTerm)
 	// start a new election
 	var vote int = 0
@@ -140,6 +141,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		defer rf.mu.Unlock()
 		if reply.Term > rf.currentTerm {
 			rf.asFollowerL(reply.Term)
+			rf.persistL()
 			return
 		}
 		if reply.Success {

@@ -111,7 +111,7 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
-func (rf *Raft) persist() {
+func (rf *Raft) persistL() {
 	// Your code here (2C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -124,9 +124,10 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(rf.log.GetLog())
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+	rf.Log_infofL("persist")
 }
 
 //
@@ -137,18 +138,17 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var log *Log
+	var logs []LogEntry
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&logs) != nil {
 		panic("readPersist error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = log
+		rf.log = RecoverLog(logs)
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	rf.Log_infofL("read Persist\n")
 
 }
@@ -227,7 +227,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		rf.asFollowerL(args.Term)
 		rf.votedFor = args.LeaderId
-
+		defer rf.persistL()
 		// check log
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
 		if rf.log.LatestIndex() < prev_index {
@@ -269,7 +269,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				rf.Log_infofL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
+				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
@@ -289,6 +289,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persistL()
 	n := rf.log.LatestIndex()
 	lastLogTerm := rf.log.LatestTerm()
 
@@ -305,7 +306,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && // not voted for anyone or voted for the candidate
 		((args.LastLogIndex >= n || lastLogTerm != args.LastLogTerm) && (args.LastLogTerm >= lastLogTerm)) {
-		rf.Log_debugfL("RV: %v-> %v,grant vote\n", args.CandidateId, rf.me)
+		rf.Log_debugfL("RV: %v-> %v,grant vote,rf.votedFor=%v,last_term=%v\n", args.CandidateId, rf.me, rf.votedFor, lastLogTerm)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
@@ -372,6 +373,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if rf.state == LEADER {
 		rf.log.Append(LogEntry{rf.currentTerm, command})
+		rf.persistL()
 		Log_infof("[%v] log append,len=%v\n", rf.me, rf.log.Len())
 	}
 	return rf.log.Len(), rf.currentTerm, rf.state == LEADER
