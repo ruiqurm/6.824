@@ -52,7 +52,7 @@ func (rf *Raft) electionL() {
 	args.CandidateId = me
 	args.LastLogIndex = rf.log.LatestIndex()
 	args.LastLogTerm = rf.log.LatestTerm()
-	Log_debugf("[%v] start a new election. total=%v,curTerm=%v,lastLogIndex=%v,lastLogTerm=%v,\n", rf.me, n, rf.currentTerm, args.LastLogIndex, args.LastLogTerm)
+	rf.Log_debugfL("start a new election. total=%v,lastLogIndex=%v,lastLogTerm=%v,\n", n, args.LastLogIndex, args.LastLogTerm)
 	// start a new election
 	var vote int = 0
 	var done int = 1
@@ -102,7 +102,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 			*vote += 1
 			if *vote >= len(rf.peers)/2 {
 				// win the elction
-				Log_infof("[%v] become leader vote=%v", rf.me, *vote)
+				rf.Log_importfL("become leader")
 				rf.asLeaderL()
 				cond.Broadcast()
 			}
@@ -131,7 +131,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		// Note here is "next index",so "equal" should include
 		args.Entries = append(args.Entries, rf.log.GetMany(rf.nextIndex[server])...)
 	}
-	Log_debugf("[%v] send AE to %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
+	rf.Log_debugfL("AE: %v -> %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
@@ -167,7 +167,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// }
 			rf.nextIndex[server] = reply.XIndex
 		}
-		rf.update()
+		rf.updateL()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
 	}
 	// wg.Done()

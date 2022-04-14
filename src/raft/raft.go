@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -90,7 +92,6 @@ type Raft struct {
 
 	// volatile state;for leader
 	nextIndex  []int
-	backoff    []int //exponential backoff
 	matchIndex []int
 	applyCh    chan ApplyMsg
 }
@@ -119,28 +120,37 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log *Log
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("readPersist error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.Log_infofL("read Persist\n")
+
 }
 
 //
@@ -224,7 +234,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = false
 			// reply.XTerm = -1
 			reply.XIndex = rf.log.LatestIndex() + 1
-			Log_debugf("[%v] receive AE from %d,failed,len(rf.log) < prev_index", rf.me, args.LeaderId)
+			rf.Log_debugfL("AE %v-> %v,failed,len(rf.log) < prev_index", args.LeaderId, rf.me)
 			return
 		}
 
@@ -237,7 +247,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					break
 				}
 			}
-			Log_debugf("[%v] receive AE from %d,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", rf.me, args.LeaderId, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
+			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
 			reply.XIndex = idx + 1
 			reply.Success = false
 			rf.log.Cut(reply.XIndex)
@@ -247,7 +257,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if len(args.Entries) > 0 && prev_index == rf.log.LatestIndex() {
 				rf.log.Append(args.Entries...)
 			}
-			Log_debugf("[%v] receive AE from %d,succ,len(log)=%v", rf.me, args.LeaderId, rf.log.Len())
+			rf.Log_debugfL("AE: %v -> %v,succ", args.LeaderId, rf.me)
 		}
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
@@ -259,7 +269,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log.Get(i).Term, rf.log.Get(i).Command)
+				rf.Log_infofL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				rf.applyCh <- msg
 			}
 			rf.lastApplied = rf.commitIndex
@@ -290,12 +300,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.Term < rf.currentTerm {
-		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v; currentTerm=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, rf.currentTerm)
+		rf.Log_debugfL("RV: %v-> %v,reject;votedFor=%v;args.term=%v; currentTerm=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, rf.currentTerm)
 		reply.VoteGranted = false
 		return
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && // not voted for anyone or voted for the candidate
 		((args.LastLogIndex >= n || lastLogTerm != args.LastLogTerm) && (args.LastLogTerm >= lastLogTerm)) {
-		Log_debugf("[%v] receive from [%v],grant vote\n", rf.me, args.CandidateId)
+		rf.Log_debugfL("RV: %v-> %v,grant vote\n", args.CandidateId, rf.me)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
@@ -305,7 +315,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			term = rf.log.Get(n).Term
 		}
-		Log_debugf("[%v] receive from [%v],reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", rf.me, args.CandidateId, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
+		rf.Log_debugfL("RV: %v-> %v,reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
 		reply.VoteGranted = false
 	}
 
@@ -445,16 +455,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
 	rf.setElectionTimeL()
-	rf.currentTerm = 0
-	rf.votedFor = -1
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.log = NewLog()
+
+	data := persister.ReadRaftState()
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.votedFor = -1
+		rf.currentTerm = 0
+		rf.log = NewLog()
+	} else {
+		rf.readPersist(data)
+	}
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	rf.applyCh = applyCh
-	SetLevel(WarnLevel)
+	// SetLevel(WarnLevel)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	return rf

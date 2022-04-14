@@ -60,7 +60,7 @@ func (l *Log) GetTerm(index int) int {
 	}
 }
 
-func (rf *Raft) update() {
+func (rf *Raft) updateL() {
 	// scan matchIndex and update commitIndex
 	for i := rf.commitIndex + 1; i <= rf.log.LatestIndex(); i++ {
 		count := 0
@@ -75,7 +75,7 @@ func (rf *Raft) update() {
 					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				Log_infof("[%v] apply msg(index=%v,term=%v,command=%v)", rf.me, i, rf.log.Get(i).Term, rf.log.Get(i).Command)
+				rf.Log_infofL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				rf.applyCh <- msg
 				rf.lastApplied = i
 				break
