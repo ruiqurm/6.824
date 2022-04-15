@@ -395,13 +395,14 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.currentTerm = 0
-	rf.votedFor = -1
-	rf.state = FOLLOWER
-	rf.setElectionTimeL()
-	rf.commitIndex = 0
-	rf.lastApplied = 0
-	rf.log = NewLog()
+	rf.Log_importfL("be killed")
+	// rf.currentTerm = 0
+	// rf.votedFor = -1
+	// rf.state = FOLLOWER
+	// rf.setElectionTimeL()
+	// rf.commitIndex = 0
+	// rf.lastApplied = 0
+	// rf.log = NewLog()
 	// time.Sleep(time.Duration(1000) * time.Millisecond)
 }
 
@@ -471,7 +472,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	// initialize from state persisted before a crash
 	rf.applyCh = applyCh
-	// SetLevel(WarnLevel)
+	SetLevel(ImportantLevel)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	return rf

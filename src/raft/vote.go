@@ -168,6 +168,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// 	rf.nextIndex[server] = next_backoff
 			// }
 			rf.nextIndex[server] = reply.XIndex
+			rf.Log_infofL("AE failed,leader update %v nextIndex as %v", server, reply.XIndex)
 		}
 		rf.updateL()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
