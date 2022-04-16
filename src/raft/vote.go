@@ -142,6 +142,8 @@ func (rf *Raft) sendAppendEntries(server int) {
 		if reply.Term > rf.currentTerm {
 			rf.asFollowerL(reply.Term)
 			rf.persistL()
+		}
+		if rf.state != LEADER {
 			return
 		}
 		if reply.Success {
@@ -149,10 +151,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 			if len(args.Entries) > 0 {
 				rf.matchIndex[server] = prev_index + len(args.Entries)
 				rf.nextIndex[server] = rf.matchIndex[server] + 1
+				rf.Log_infofL("AE succ,[%v] nextIndex = %v", server, rf.nextIndex[server])
 			} else {
 				rf.matchIndex[server] = prev_index
 			}
-			// rf.backoff[server] = 1
 		} else {
 			// linear backoff
 			// rf.nextIndex[server]--
@@ -167,8 +169,12 @@ func (rf *Raft) sendAppendEntries(server int) {
 			// } else {
 			// 	rf.nextIndex[server] = next_backoff
 			// }
-			rf.nextIndex[server] = reply.XIndex
-			rf.Log_infofL("AE failed,leader update %v nextIndex as %v", server, reply.XIndex)
+			if reply.XIndex > 0 {
+				rf.nextIndex[server] = reply.XIndex
+			} else {
+				rf.nextIndex[server] = 1
+			}
+			rf.Log_infofL("AE failed,leader update %v nextIndex=%v", server, reply.XIndex)
 		}
 		rf.updateL()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)

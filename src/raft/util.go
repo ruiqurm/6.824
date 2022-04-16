@@ -97,3 +97,14 @@ func (rf *Raft) Log_importfL(format string, a ...interface{}) {
 	append_str := fmt.Sprintf(format, a...)
 	Log_importf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
 }
+
+// func (rf *Raft) print_all_logs() {
+// 	var sb strings.Builder
+// 	for i := 1; i <= rf.log.Len(); i++ {
+// 		rf.log.
+// 		sb.WriteString("a")
+// 	}
+
+// 	fmt.Println(sb.String())
+// 	Log_debugf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
+// }

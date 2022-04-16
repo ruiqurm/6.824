@@ -94,6 +94,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 	applyCh    chan ApplyMsg
+	applyCond  *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -104,6 +105,11 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == LEADER
+}
+func (rf *Raft) checkThenPersistL(should_persist *bool) {
+	if *should_persist {
+		rf.persistL()
+	}
 }
 
 //
@@ -223,18 +229,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.setElectionTimeL() // refresh timer
 	reply.Term = rf.currentTerm
+	should_persist := false
+	defer rf.checkThenPersistL(&should_persist)
 	if args.Term >= rf.currentTerm {
-		reply.Success = true
-		rf.asFollowerL(args.Term)
-		rf.votedFor = args.LeaderId
-		defer rf.persistL()
+		if rf.state != FOLLOWER {
+			rf.asFollowerL(args.Term)
+			should_persist = true
+		}
+		if rf.votedFor != args.LeaderId {
+			rf.votedFor = args.LeaderId
+			should_persist = true
+		}
+		// defer rf.persistL()
 		// check log
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
 		if rf.log.LatestIndex() < prev_index {
 			reply.Success = false
 			// reply.XTerm = -1
 			reply.XIndex = rf.log.LatestIndex() + 1
-			rf.Log_debugfL("AE %v-> %v,failed,len(rf.log) < prev_index", args.LeaderId, rf.me)
+			rf.Log_debugfL("AE %v-> %v,failed,len(rf.log) < prev_index,xindex=%v", args.LeaderId, rf.me, reply.XIndex)
 			return
 		}
 
@@ -247,15 +260,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					break
 				}
 			}
-			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
 			reply.XIndex = idx + 1
 			reply.Success = false
-			rf.log.Cut(reply.XIndex)
+			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
+			if rf.log.Cut(reply.XIndex) {
+				should_persist = true
+			}
 		} else {
 			// have been synchronized with leader
-			rf.log.Cut(prev_index + 1)
+			reply.Success = true
+			if rf.log.Cut(prev_index + 1) {
+				should_persist = true
+			}
 			if len(args.Entries) > 0 && prev_index == rf.log.LatestIndex() {
 				rf.log.Append(args.Entries...)
+				should_persist = true
 			}
 			rf.Log_debugfL("AE: %v -> %v,succ", args.LeaderId, rf.me)
 		}
@@ -263,16 +282,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
 		}
 		if reply.Success && rf.commitIndex > rf.lastApplied {
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log.Get(i).Command,
-					CommandIndex: i,
-				}
-				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
-				rf.applyCh <- msg
-			}
-			rf.lastApplied = rf.commitIndex
+			// for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			// 	msg := ApplyMsg{
+			// 		CommandValid: true,
+			// 		Command:      rf.log.Get(i).Command,
+			// 		CommandIndex: i,
+			// 	}
+			// 	rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
+			// 	rf.applyCh <- msg
+			// }
+			// rf.lastApplied = rf.commitIndex
+			rf.applyCond.Broadcast()
 		}
 	} else {
 		reply.Success = false
@@ -289,7 +309,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persistL()
+	// defer rf.persistL()
+	should_persist := false
+	defer rf.checkThenPersistL(&should_persist)
 	n := rf.log.LatestIndex()
 	lastLogTerm := rf.log.LatestTerm()
 
@@ -298,6 +320,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.asFollowerL(args.Term)
 		rf.votedFor = -1
+		should_persist = true
 	}
 
 	if args.Term < rf.currentTerm {
@@ -305,10 +328,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && // not voted for anyone or voted for the candidate
-		((args.LastLogIndex >= n || lastLogTerm != args.LastLogTerm) && (args.LastLogTerm >= lastLogTerm)) {
+		((args.LastLogIndex >= n && lastLogTerm == args.LastLogTerm) || (args.LastLogTerm > lastLogTerm)) {
 		rf.Log_debugfL("RV: %v-> %v,grant vote,rf.votedFor=%v,last_term=%v\n", args.CandidateId, rf.me, rf.votedFor, lastLogTerm)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		should_persist = true
 	} else {
 		var term int
 		if n == 0 {
@@ -319,7 +343,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.Log_debugfL("RV: %v-> %v,reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
 		reply.VoteGranted = false
 	}
-
 }
 
 //
@@ -374,7 +397,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == LEADER {
 		rf.log.Append(LogEntry{rf.currentTerm, command})
 		rf.persistL()
-		Log_infof("[%v] log append,len=%v\n", rf.me, rf.log.Len())
+		Log_infof("[%v] log append,index=%v,term%v\n", rf.me, rf.log.Len(), rf.currentTerm)
 	}
 	return rf.log.Len(), rf.currentTerm, rf.state == LEADER
 }
@@ -396,6 +419,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.Log_importfL("be killed")
+	rf.applyCond.Broadcast()
 	// rf.currentTerm = 0
 	// rf.votedFor = -1
 	// rf.state = FOLLOWER
@@ -461,7 +485,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-
+	rf.applyCond = sync.NewCond(&sync.Mutex{})
 	data := persister.ReadRaftState()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.votedFor = -1
@@ -472,9 +496,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	// initialize from state persisted before a crash
 	rf.applyCh = applyCh
-	SetLevel(ImportantLevel)
+	// SetLevel(ImportantLevel)
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 	return rf
 }
 
