@@ -30,7 +30,8 @@ func (l *Log) Get(index int) (e *LogEntry) {
 }
 func (l *Log) GetMany(index int) (e []LogEntry) {
 	if index > len(l.log) {
-		panic("index out of range")
+		// may be no longer leader
+		return nil
 	}
 	right := min(len(l.log), index-1+MAX_LOG_PER_REQUEST)
 	return l.log[index-1 : right]
@@ -60,8 +61,11 @@ func (l *Log) Append(e ...LogEntry) {
 }
 
 func (l *Log) GetTerm(index int) int {
-	if index <= 1 {
+	if index < 1 {
 		return 0
+	} else if index > len(l.log) {
+		// may be no longer leader
+		return -1
 	} else {
 		return l.log[index-1].Term
 	}
@@ -100,12 +104,12 @@ func (rf *Raft) applier() {
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				msg := ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log.Get(i).Command,
 					CommandIndex: i,
 				}
-				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 				rf.applyCh <- msg
 				rf.lastApplied = i
 			}

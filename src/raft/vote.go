@@ -79,6 +79,7 @@ func (rf *Raft) leaderLoop(cond *sync.Cond) {
 		rf.mu.Unlock()
 		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 		rf.mu.Lock()
+		rf.report_indexL()
 		// rf.update()
 	}
 	rf.mu.Unlock()
@@ -132,6 +133,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 		// Note here is "next index",so "equal" should include
 		args.Entries = append(args.Entries, rf.log.GetMany(rf.nextIndex[server])...)
 	}
+	if rf.state != LEADER {
+		rf.mu.Unlock()
+		return
+	}
 	rf.Log_debugfL("AE: %v -> %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
@@ -142,8 +147,6 @@ func (rf *Raft) sendAppendEntries(server int) {
 		if reply.Term > rf.currentTerm {
 			rf.asFollowerL(reply.Term)
 			rf.persistL()
-		}
-		if rf.state != LEADER {
 			return
 		}
 		if reply.Success {

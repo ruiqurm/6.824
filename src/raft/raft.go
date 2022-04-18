@@ -263,7 +263,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.XIndex = idx + 1
 			reply.Success = false
 			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
-			if rf.log.Cut(reply.XIndex) {
+			// if rf.log.Cut(reply.XIndex) {
+			if rf.log.Cut(prev_index) {
 				should_persist = true
 			}
 		} else {
@@ -296,7 +297,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	} else {
 		reply.Success = false
-		Log_debugf("[%v] receive AE from %d,failed", rf.me, args.LeaderId)
+		rf.Log_debugfL("AE: %v -> %v,failed  args.Term<self.term", args.LeaderId, rf.me)
 	}
 }
 
@@ -321,6 +322,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.asFollowerL(args.Term)
 		rf.votedFor = -1
 		should_persist = true
+		// reply.VoteGranted = false
+		// return
 	}
 
 	if args.Term < rf.currentTerm {

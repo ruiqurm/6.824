@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -95,7 +96,7 @@ func (rf *Raft) Log_importfL(format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	Log_importf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
+	Log_importf("[%v,t=%v,l=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
 }
 
 // func (rf *Raft) print_all_logs() {
@@ -108,3 +109,22 @@ func (rf *Raft) Log_importfL(format string, a ...interface{}) {
 // 	fmt.Println(sb.String())
 // 	Log_debugf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
 // }
+
+func (rf *Raft) report_indexL() {
+	if rf.state != LEADER {
+		return
+		// panic("report_indexL called by non-leader")
+	}
+	var sb strings.Builder
+	sb.WriteString("index\t")
+	for i := 0; i < len(rf.peers); i++ {
+		sb.WriteString(fmt.Sprintf("\t%v", i))
+	}
+	sb.WriteString("\n")
+	sb.WriteString("nextIndex:")
+	for i := 0; i < len(rf.peers); i++ {
+		sb.WriteString(fmt.Sprintf("\t%v ", rf.nextIndex[i]))
+	}
+	sb.WriteString("\n")
+	Log_debugf("[%v,t=%v,log=%v]\n%v", rf.me, rf.currentTerm, rf.log.Len(), sb.String())
+}
