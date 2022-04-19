@@ -71,7 +71,7 @@ func (rf *Raft) Log_infofL(format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	Log_infof("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
+	Log_infof("[%v,term=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
 }
 func (rf *Raft) Log_debugfL(format string, a ...interface{}) {
 	var state string
@@ -83,7 +83,7 @@ func (rf *Raft) Log_debugfL(format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	Log_debugf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
+	Log_debugf("[%v,term=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
 }
 
 func (rf *Raft) Log_importfL(format string, a ...interface{}) {
@@ -96,7 +96,7 @@ func (rf *Raft) Log_importfL(format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	Log_importf("[%v,t=%v,l=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
+	Log_importf("[%v,t=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
 }
 
 // func (rf *Raft) print_all_logs() {
@@ -126,5 +126,19 @@ func (rf *Raft) report_indexL() {
 		sb.WriteString(fmt.Sprintf("\t%v ", rf.nextIndex[i]))
 	}
 	sb.WriteString("\n")
-	Log_debugf("[%v,t=%v,log=%v]\n%v", rf.me, rf.currentTerm, rf.log.Len(), sb.String())
+	Log_debugf("[%v,t=%v,log=%v,len=%v]\n%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), sb.String())
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -1,7 +1,9 @@
 package raft
 
 type Log struct {
-	log []LogEntry
+	lastIndex int
+	lastTerm  int
+	log       []LogEntry
 }
 
 type LogEntry struct {
@@ -12,63 +14,84 @@ type LogEntry struct {
 func (l *Log) GetLog() []LogEntry {
 	return l.log
 }
-func NewLog() *Log {
-	return &Log{[]LogEntry{}}
+func NewLog(lastIndex int, lastTerm int, logs []LogEntry) *Log {
+	return &Log{lastIndex, lastTerm, logs}
 }
-func RecoverLog(logs []LogEntry) *Log {
-	return &Log{log: logs}
-}
+
+// func RecoverLog(logs []LogEntry) *Log {
+// 	return &Log{log: logs}
+// }
 func (l *Log) Len() int {
 	return len(l.log)
 }
 
 func (l *Log) Get(index int) (e *LogEntry) {
-	if len(l.log) == 0 {
+	if index <= l.lastIndex {
 		panic("attempt to get from empty log")
 	}
-	return &l.log[index-1]
+	return &l.log[index-1-l.lastIndex]
 }
 func (l *Log) GetMany(index int) (e []LogEntry) {
-	if index > len(l.log) {
+	if index-l.lastIndex > len(l.log) {
 		// may be no longer leader
 		return nil
 	}
-	right := min(len(l.log), index-1+MAX_LOG_PER_REQUEST)
-	return l.log[index-1 : right]
+	right := min(len(l.log), index-l.lastIndex-1+MAX_LOG_PER_REQUEST)
+	return l.log[index-1-l.lastIndex : right]
 }
 func (l *Log) LatestTerm() (term int) {
 	if len(l.log) == 0 {
-		return 0
+		return l.lastTerm
 	} else {
-		return l.log[len(l.log)-1].Term
+		return l.log[len(l.log)-1-l.lastIndex].Term
 	}
 }
 
 func (l *Log) LatestIndex() int {
-	return len(l.log)
+	return len(l.log) + l.lastIndex
 }
 
 func (l *Log) Cut(index int) bool {
-	if index <= len(l.log) {
-		l.log = l.log[:index-1]
+	if index-l.lastIndex <= len(l.log) {
+		l.log = l.log[:index-1-l.lastIndex]
 		return true
 	}
 	return false
 }
-
+func (l *Log) Reindex(lastIndex int, lastTerm int) {
+	if lastIndex >= l.lastIndex {
+		l.log = l.log[lastIndex-l.lastIndex:] // lastIndex -l.lastIndex - 1 + 1
+	} else {
+		l.log = []LogEntry{}
+	}
+	Log_infof("reindex;Index = %v,Term = %v,len=%v", lastIndex, lastTerm, len(l.log))
+	l.lastIndex = lastIndex
+	l.lastTerm = lastTerm
+}
 func (l *Log) Append(e ...LogEntry) {
 	l.log = append(l.log, e...)
 }
 
 func (l *Log) GetTerm(index int) int {
+	Log_debugf("lastIndex=%v,index=%v", l.lastIndex, index)
 	if index < 1 {
 		return 0
-	} else if index > len(l.log) {
+	} else if index == l.lastIndex {
+		return l.lastTerm
+	} else if index-l.lastIndex > len(l.log) {
 		// may be no longer leader
 		return -1
 	} else {
-		return l.log[index-1].Term
+		return l.log[index-1-l.lastIndex].Term
 	}
+}
+
+func (l *Log) GetLastIncludedIndex() int {
+	return l.lastIndex
+}
+
+func (l *Log) GetLastIncludedTerm() int {
+	return l.lastTerm
 }
 
 func (rf *Raft) updateL() {
@@ -102,19 +125,36 @@ func (rf *Raft) applier() {
 			break
 		}
 		rf.mu.Lock()
-		if rf.commitIndex > rf.lastApplied {
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
-				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log.Get(i).Command,
-					CommandIndex: i,
-				}
-				rf.applyCh <- msg
-				rf.lastApplied = i
-			}
-		}
+		rf.applyMsg()
 		rf.mu.Unlock()
 	}
 
+}
+
+func (rf *Raft) applyMsg() {
+	if rf.commitIndex > rf.lastApplied {
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log.Get(i).Command,
+				CommandIndex: i,
+			}
+			rf.applyCh <- msg
+			rf.lastApplied = i
+		}
+
+	}
+}
+
+func (rf *Raft) heartBeat() {
+	// should call with lock
+	me := rf.me
+	n := len(rf.peers)
+	// Log_debugf("[%v] leader send heartbeat\n", rf.me)
+	for server := 0; server < n; server++ {
+		if server != me {
+			go rf.sendAppendEntries(server)
+		}
+	}
 }

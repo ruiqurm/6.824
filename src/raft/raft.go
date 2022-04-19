@@ -95,6 +95,9 @@ type Raft struct {
 	matchIndex []int
 	applyCh    chan ApplyMsg
 	applyCond  *sync.Cond
+
+	// snapshot
+	snapshot []byte
 }
 
 // return currentTerm and whether this server
@@ -131,8 +134,8 @@ func (rf *Raft) persistL() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log.GetLog())
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	state := w.Bytes()
+	rf.persister.SaveStateAndSnapshot(state, rf.snapshot)
 	rf.Log_infofL("persist")
 }
 
@@ -152,30 +155,10 @@ func (rf *Raft) readPersist(data []byte) {
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = RecoverLog(logs)
+		rf.log = NewLog(0, 0, logs)
 	}
 
 	rf.Log_infofL("read Persist\n")
-
-}
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
 
 }
 
@@ -262,7 +245,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			reply.XIndex = idx + 1
 			reply.Success = false
-			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log length is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.Len(), reply.XIndex)
+			rf.Log_debugfL("AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log index is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.LatestIndex(), reply.XIndex)
 			// if rf.log.Cut(reply.XIndex) {
 			if rf.log.Cut(prev_index) {
 				should_persist = true
@@ -283,16 +266,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
 		}
 		if reply.Success && rf.commitIndex > rf.lastApplied {
-			// for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			// 	msg := ApplyMsg{
-			// 		CommandValid: true,
-			// 		Command:      rf.log.Get(i).Command,
-			// 		CommandIndex: i,
-			// 	}
-			// 	rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
-			// 	rf.applyCh <- msg
-			// }
-			// rf.lastApplied = rf.commitIndex
 			rf.applyCond.Broadcast()
 		}
 	} else {
@@ -400,9 +373,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == LEADER {
 		rf.log.Append(LogEntry{rf.currentTerm, command})
 		rf.persistL()
-		Log_infof("[%v] log append,index=%v,term%v\n", rf.me, rf.log.Len(), rf.currentTerm)
+		Log_infof("[%v] log append,index=%v,term%v\n", rf.me, rf.log.LatestIndex(), rf.currentTerm)
 	}
-	return rf.log.Len(), rf.currentTerm, rf.state == LEADER
+	return rf.log.LatestIndex(), rf.currentTerm, rf.state == LEADER
 }
 
 //
@@ -452,18 +425,6 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) heartBeat() {
-	// should call with lock
-	me := rf.me
-	n := len(rf.peers)
-	// Log_debugf("[%v] leader send heartbeat\n", rf.me)
-	for server := 0; server < n; server++ {
-		if server != me {
-			go rf.sendAppendEntries(server)
-		}
-	}
-}
-
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -493,7 +454,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.votedFor = -1
 		rf.currentTerm = 0
-		rf.log = NewLog()
+		rf.log = NewLog(0, 0, []LogEntry{})
 	} else {
 		rf.readPersist(data)
 	}
@@ -504,11 +465,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 	go rf.applier()
 	return rf
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
