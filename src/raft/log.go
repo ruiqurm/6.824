@@ -43,7 +43,7 @@ func (l *Log) LatestTerm() (term int) {
 	if len(l.log) == 0 {
 		return l.lastTerm
 	} else {
-		return l.log[len(l.log)-1-l.lastIndex].Term
+		return l.log[l.LatestIndex()-1-l.lastIndex].Term
 	}
 }
 
@@ -59,12 +59,12 @@ func (l *Log) Cut(index int) bool {
 	return false
 }
 func (l *Log) Reindex(lastIndex int, lastTerm int) {
-	if lastIndex >= l.lastIndex {
+	if lastIndex >= l.lastIndex && lastIndex <= l.LatestIndex() {
 		l.log = l.log[lastIndex-l.lastIndex:] // lastIndex -l.lastIndex - 1 + 1
 	} else {
 		l.log = []LogEntry{}
 	}
-	Log_infof("reindex;Index = %v,Term = %v,len=%v", lastIndex, lastTerm, len(l.log))
+	// Log_infof("reindex;Index = %v,Term = %v,len=%v", lastIndex, lastTerm, len(l.log))
 	l.lastIndex = lastIndex
 	l.lastTerm = lastTerm
 }
@@ -73,7 +73,6 @@ func (l *Log) Append(e ...LogEntry) {
 }
 
 func (l *Log) GetTerm(index int) int {
-	Log_debugf("lastIndex=%v,index=%v", l.lastIndex, index)
 	if index < 1 {
 		return 0
 	} else if index == l.lastIndex {
@@ -134,7 +133,7 @@ func (rf *Raft) applier() {
 func (rf *Raft) applyMsg() {
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.Log_importfL("apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
+			rf.Debug(dApply, "apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
 			msg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log.Get(i).Command,

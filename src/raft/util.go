@@ -2,11 +2,11 @@ package raft
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
+	"strconv"
 	"strings"
-	"sync"
+	"time"
 )
 
 // Debugging
@@ -19,49 +19,53 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type logTopic string
+
 const (
-	DebugLevel = iota
-	InfoLevel
-	ImportantLevel
+	dNextIndex   logTopic = "NEXT"
+	dSnapshot    logTopic = "SNAP"
+	dApply       logTopic = "APPL"
+	dPersist     logTopic = "PERS"
+	dAppendEntry logTopic = "APPE"
+	dRequestVote logTopic = "REQV"
+	dLog         logTopic = "LOGS"
+	dOther       logTopic = "OTHE"
 )
 
-var (
-	debugLog     = log.New(os.Stdout, "\033[36m[debug]\033[0m ", log.Ltime|log.Lmicroseconds)
-	infoLog      = log.New(os.Stdout, "\033[34m[info ]\033[0m ", log.Ltime|log.Lmicroseconds)
-	importantLog = log.New(os.Stdout, "\033[31m[important ]\033[0m ", log.Ltime|log.Lmicroseconds)
-	loggers      = []*log.Logger{debugLog, infoLog, importantLog}
-	mu           sync.Mutex
-)
-
-var (
-	Log_debug   = debugLog.Println
-	Log_debugf  = debugLog.Printf
-	Log_info    = infoLog.Println
-	Log_infof   = infoLog.Printf
-	Log_import  = importantLog.Println
-	Log_importf = importantLog.Printf
-)
-
-func SetLevel(level int) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	for _, logger := range loggers {
-		logger.SetOutput(os.Stdout)
+func getVerbosity() int {
+	v := os.Getenv("VERBOSE")
+	level := 0
+	if v != "" {
+		var err error
+		level, err = strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("Invalid verbosity %v", v)
+		}
 	}
-	if level > ImportantLevel {
-		importantLog.SetOutput(ioutil.Discard)
-		infoLog.SetOutput(ioutil.Discard)
-		debugLog.SetOutput(ioutil.Discard)
-	} else if level > InfoLevel {
-		infoLog.SetOutput(ioutil.Discard)
-		debugLog.SetOutput(ioutil.Discard)
-	} else if level > DebugLevel {
-		debugLog.SetOutput(ioutil.Discard)
-	}
-
+	return level
 }
-func (rf *Raft) Log_infofL(format string, a ...interface{}) {
+
+var debugStart time.Time
+var debugVerbosity int
+
+func init() {
+	debugVerbosity = getVerbosity()
+	debugStart = time.Now()
+
+	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+}
+
+func DebugPrint(topic logTopic, format string, a ...interface{}) {
+	if debugVerbosity >= 1 {
+		time := time.Since(debugStart).Microseconds()
+		time /= 100
+		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		format = prefix + format
+		log.Printf(format, a...)
+	}
+}
+
+func (rf *Raft) Debug(topic logTopic, format string, a ...interface{}) {
 	var state string
 	if rf.state == FOLLOWER {
 		state = "F"
@@ -71,44 +75,8 @@ func (rf *Raft) Log_infofL(format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	Log_infof("[%v,term=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
+	DebugPrint(topic, "[%v] t=%v,log=%v,len=%v,%v %v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
 }
-func (rf *Raft) Log_debugfL(format string, a ...interface{}) {
-	var state string
-	if rf.state == FOLLOWER {
-		state = "F"
-	} else if rf.state == CANDIDATE {
-		state = "C"
-	} else if rf.state == LEADER {
-		state = "L"
-	}
-	append_str := fmt.Sprintf(format, a...)
-	Log_debugf("[%v,term=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
-}
-
-func (rf *Raft) Log_importfL(format string, a ...interface{}) {
-	var state string
-	if rf.state == FOLLOWER {
-		state = "F"
-	} else if rf.state == CANDIDATE {
-		state = "C"
-	} else if rf.state == LEADER {
-		state = "L"
-	}
-	append_str := fmt.Sprintf(format, a...)
-	Log_importf("[%v,t=%v,log=%v,len=%v,%v]%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
-}
-
-// func (rf *Raft) print_all_logs() {
-// 	var sb strings.Builder
-// 	for i := 1; i <= rf.log.Len(); i++ {
-// 		rf.log.
-// 		sb.WriteString("a")
-// 	}
-
-// 	fmt.Println(sb.String())
-// 	Log_debugf("[%v,term=%v,log=%v,%v]%v", rf.me, rf.currentTerm, rf.log.Len(), state, append_str)
-// }
 
 func (rf *Raft) report_indexL() {
 	if rf.state != LEADER {
@@ -123,10 +91,14 @@ func (rf *Raft) report_indexL() {
 	sb.WriteString("\n")
 	sb.WriteString("nextIndex:")
 	for i := 0; i < len(rf.peers); i++ {
-		sb.WriteString(fmt.Sprintf("\t%v ", rf.nextIndex[i]))
+		if i != rf.me {
+			sb.WriteString(fmt.Sprintf("\t%v ", rf.nextIndex[i]))
+		} else {
+			sb.WriteString(fmt.Sprintf("\tNaN "))
+		}
 	}
 	sb.WriteString("\n")
-	Log_debugf("[%v,t=%v,log=%v,len=%v]\n%v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), sb.String())
+	DebugPrint(dNextIndex, "%v\n%v", rf.me, sb.String())
 }
 
 func min(a, b int) int {
@@ -141,4 +113,18 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func bineary_search(array []int, value int) int {
+	l := 0
+	r := len(array)
+	for l < r {
+		mid := ((r - l) / 2) + l
+		if array[mid] < value {
+			l = mid + 1
+		} else {
+			r = mid
+		}
+	}
+	return l
 }

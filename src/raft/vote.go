@@ -53,7 +53,7 @@ func (rf *Raft) electionL() {
 	args.LastLogIndex = rf.log.LatestIndex()
 	args.LastLogTerm = rf.log.LatestTerm()
 	rf.persistL()
-	rf.Log_debugfL("start a new election. total=%v,lastLogIndex=%v,lastLogTerm=%v,\n", n, args.LastLogIndex, args.LastLogTerm)
+	rf.Debug(dRequestVote, "start election.lastLogIndex=%v,lastLogTerm=%v,\n", args.LastLogIndex, args.LastLogTerm)
 	// start a new election
 	var vote int = 0
 	var done int = 1
@@ -79,7 +79,7 @@ func (rf *Raft) leaderLoop(cond *sync.Cond) {
 		rf.mu.Unlock()
 		time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 		rf.mu.Lock()
-		rf.report_indexL()
+		// rf.report_indexL()
 		// rf.update()
 	}
 	rf.mu.Unlock()
@@ -104,7 +104,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 			*vote += 1
 			if *vote >= len(rf.peers)/2 {
 				// win the elction
-				rf.Log_importfL("become leader")
+				rf.Debug(dRequestVote, "become leader")
 				rf.asLeaderL()
 				cond.Broadcast()
 			}
@@ -125,6 +125,14 @@ func (rf *Raft) sendAppendEntries(server int) {
 	args.LeaderCommit = rf.commitIndex
 
 	prev_index := rf.nextIndex[server] - 1
+	if prev_index < rf.log.GetLastIncludedIndex() {
+		// send
+		go rf.SendInstallSnapshot(server)
+		rf.Debug(dAppendEntry, "%v -> %v SendInstallSnapshot again", rf.me, server)
+		rf.mu.Unlock()
+		return
+	}
+
 	args.PrevLogTerm = rf.log.GetTerm(prev_index)
 	args.PrevLogIndex = prev_index
 	if rf.log.LatestIndex() > prev_index {
@@ -137,7 +145,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 		rf.mu.Unlock()
 		return
 	}
-	rf.Log_debugfL("AE: %v -> %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,withdata=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries) != 0)
+	rf.Debug(dAppendEntry, "AE: %v -> %v,PrevLogIndex=%v,PrevLogTerm=%v,commitIndex=%v,data=%v\n", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, rf.commitIndex, len(args.Entries))
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
@@ -149,38 +157,27 @@ func (rf *Raft) sendAppendEntries(server int) {
 			rf.persistL()
 			return
 		}
+		if rf.state != LEADER {
+			return
+		}
 		if reply.Success {
 			// If successful: update nextIndex and matchIndex for follower
 			if len(args.Entries) > 0 {
 				rf.matchIndex[server] = prev_index + len(args.Entries)
 				rf.nextIndex[server] = rf.matchIndex[server] + 1
-				rf.Log_infofL("AE succ,[%v] nextIndex = %v", server, rf.nextIndex[server])
+				rf.Debug(dAppendEntry, "AE succ,[%v] nextIndex = %v", server, rf.nextIndex[server])
 			} else {
 				rf.matchIndex[server] = prev_index
 			}
 		} else {
-			// linear backoff
-			// rf.nextIndex[server]--
-
-			// using exponential backoff
-			// if rf.backoff[server] < MAX_LOG_PER_REQUEST {
-			// 	rf.backoff[server] <<= 1
-			// }
-			// next_backoff := rf.nextIndex[server] - rf.backoff[server]
-			// if next_backoff < 1 {
-			// 	rf.nextIndex[server] = 1
-			// } else {
-			// 	rf.nextIndex[server] = next_backoff
-			// }
 			if reply.XIndex > 0 {
 				rf.nextIndex[server] = reply.XIndex
 			} else {
 				rf.nextIndex[server] = 1
 			}
-			rf.Log_infofL("AE failed,leader update %v nextIndex=%v", server, reply.XIndex)
+			rf.Debug(dAppendEntry, "AE failed,leader update %v nextIndex=%v", server, reply.XIndex)
 		}
 		rf.updateL()
 		// Log_debugf("[%v] commit=%v,last_applied=%v\n", rf.me, rf.commitIndex, rf.lastApplied)
 	}
-	// wg.Done()
 }
