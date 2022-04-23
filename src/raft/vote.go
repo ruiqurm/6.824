@@ -170,10 +170,25 @@ func (rf *Raft) sendAppendEntries(server int) {
 				rf.matchIndex[server] = prev_index
 			}
 		} else {
-			if reply.XIndex > 0 {
-				rf.nextIndex[server] = reply.XIndex
+			if reply.XTerm > 0 {
+				found := false
+				idx := rf.log.LatestIndex()
+				for ; idx > 0; idx-- {
+					term := rf.log.GetTerm(idx)
+					if term == reply.XTerm {
+						found = true
+						break
+					} else if term < reply.XTerm {
+						break
+					}
+				}
+				if !found {
+					rf.nextIndex[server] = reply.XIndex
+				} else {
+					rf.nextIndex[server] = idx + 1
+				}
 			} else {
-				rf.nextIndex[server] = 1
+				rf.nextIndex[server] = reply.XIndex
 			}
 			rf.Debug(dAppendEntry, "AE failed,leader update %v nextIndex=%v", server, reply.XIndex)
 		}

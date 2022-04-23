@@ -98,9 +98,7 @@ type Raft struct {
 	applyCond  *sync.Cond
 
 	// snapshot,involatile
-	snapshot          []byte
-	snapshotLastIndex int
-	snapshotLastTerm  int
+	snapshot []byte
 }
 
 // return currentTerm and whether this server
@@ -136,12 +134,12 @@ func (rf *Raft) persistL() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.snapshotLastIndex)
-	e.Encode(rf.snapshotLastTerm)
+	e.Encode(rf.log.GetLastIncludedIndex())
+	e.Encode(rf.log.GetLastIncludedTerm())
 	e.Encode(rf.log.GetLog())
 	state := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(state, rf.snapshot)
-	rf.Debug(dPersist, "persist")
+	rf.Debug(dPersist, "persist;cT=%v,vf=%v,Lindex=%v,Lterm=%v", rf.currentTerm, rf.votedFor, rf.log.GetLastIncludedIndex(), rf.log.GetLastIncludedTerm())
 }
 
 //
@@ -165,6 +163,8 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = NewLog(snapshotLastIndex, snapshotLastTerm, logs)
+		rf.lastApplied = snapshotLastIndex
+		rf.commitIndex = snapshotLastIndex
 	}
 
 	rf.Debug(dPersist, "read Persist\n")
@@ -205,8 +205,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
-	// XTerm   int // collision term
-	XIndex int // first log index which term equals to collision term
+	XTerm   int // collision term
+	XIndex  int // first log index which term equals to collision term
 	// XLen    int // distance of real next index and now index
 }
 
@@ -237,7 +237,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
 		if rf.log.LatestIndex() < prev_index {
 			reply.Success = false
-			// reply.XTerm = -1
+			reply.XTerm = -1
 			reply.XIndex = rf.log.LatestIndex() + 1
 			rf.Debug(dAppendEntry, "AE %v-> %v,failed,len(rf.log) < prev_index,xindex=%v", args.LeaderId, rf.me, reply.XIndex)
 			return
@@ -247,11 +247,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// should discard the log entries before prevLogIndex
 			// reply.XTerm = rf.log.GetTerm(prev_index)
 			idx := prev_index
+			var term int
 			for ; idx > 0; idx-- {
-				if rf.log.GetTerm(idx) != rf.log.GetTerm(prev_index) {
+				term = rf.log.GetTerm(idx)
+				if term != rf.log.GetTerm(prev_index) {
 					break
 				}
 			}
+			reply.XTerm = rf.log.GetTerm(prev_index)
 			reply.XIndex = idx + 1
 			reply.Success = false
 			rf.Debug(dAppendEntry, "AE: %v -> %v,failed,prev_index(index=%v,term=%v) not match(%v),log index is %v;xindex=%v", args.LeaderId, rf.me, prev_index, rf.log.GetTerm(prev_index), args.PrevLogTerm, rf.log.LatestIndex(), reply.XIndex)
@@ -322,13 +325,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		should_persist = true
 	} else {
-		var term int
-		if n == 0 {
-			term = 0
-		} else {
-			term = rf.log.Get(n).Term
-		}
-		rf.Debug(dRequestVote, "RV: %v-> %v,reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v,term=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n, term)
+		rf.Debug(dRequestVote, "RV: %v-> %v,reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n)
 		reply.VoteGranted = false
 	}
 }
