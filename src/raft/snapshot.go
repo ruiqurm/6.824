@@ -1,5 +1,7 @@
 package raft
 
+import "sync/atomic"
+
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -43,9 +45,9 @@ type InstallSnapshotReply struct {
 // }
 
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
+	return atomic.LoadInt32(&rf.is_appling) == 0
 	// Your code here (2D).
-	return true
+	// return true
 }
 
 // the service says it has created a snapshot that has
@@ -66,11 +68,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log.Reindex(index, lastTerm)
 		rf.snapshot = snapshot
 		rf.persistL()
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				go rf.SendInstallSnapshot(i)
-			}
-		}
+		// for i := 0; i < len(rf.peers); i++ {
+		// 	if i != rf.me {
+		// 		go rf.SendInstallSnapshot(i)
+		// 	}
+		// }
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
 			Snapshot:      rf.snapshot,

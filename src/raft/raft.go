@@ -96,7 +96,7 @@ type Raft struct {
 	matchIndex []int
 	applyCh    chan ApplyMsg
 	applyCond  *sync.Cond
-
+	is_appling int32
 	// snapshot,involatile
 	snapshot []byte
 }
@@ -458,6 +458,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCond = sync.NewCond(&sync.Mutex{})
+	rf.is_appling = 0
 	data := persister.ReadRaftState()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.votedFor = -1
