@@ -1,7 +1,5 @@
 package raft
 
-import "sync/atomic"
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -20,32 +18,8 @@ type InstallSnapshotReply struct {
 	Term int
 }
 
-// type Snapshot struct {
-// 	Snapshot  []byte
-// 	LastIndex []int
-// 	LastTerm  []int
-// 	pos
-// }
-
-// func NewSnapshot(snapshot []byte, lastIndex []int, lastTerm []int) *Snapshot {
-// 	return &Snapshot{snapshot, lastIndex, lastTerm}
-// }
-// func (s *Snapshot) Append(data []byte, lastIndex int, lastTerm int) {
-// 	s.Snapshot = append(s.Snapshot, data...)
-// 	s.LastIndex = append(s.LastIndex, lastIndex)
-// 	s.LastTerm = append(s.LastTerm, lastTerm)
-// }
-// func (s *Snapshot) GetLeastMatch(index int) ([]byte, int, int) {
-// 	lastindex := bineary_search(s.LastIndex, index)
-// 	if lastindex == len(s.LastIndex) {
-// 		return nil, -1, -1
-// 	}
-
-// 	return s.Snapshot[]
-// }
-
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	return atomic.LoadInt32(&rf.is_appling) == 0
+	return true
 	// Your code here (2D).
 	// return true
 }
@@ -59,7 +33,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	go func() {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if rf.log.GetLastIncludedIndex() >= index {
+		if rf.log.GetLastIncludedIndex() >= index || index > rf.log.LatestIndex() {
 			rf.Debug(dSnapshot, "Snapshot %d ignore\n", index)
 			return
 		}
@@ -68,11 +42,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log.Reindex(index, lastTerm)
 		rf.snapshot = snapshot
 		rf.persistL()
-		// for i := 0; i < len(rf.peers); i++ {
-		// 	if i != rf.me {
-		// 		go rf.SendInstallSnapshot(i)
-		// 	}
-		// }
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
 			Snapshot:      rf.snapshot,
@@ -80,9 +49,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			SnapshotIndex: rf.log.GetLastIncludedIndex(),
 		}
 		rf.lastApplied = rf.log.GetLastIncludedIndex()
-
 	}()
-
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
 	rf.mu.Lock()
