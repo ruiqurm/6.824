@@ -14,6 +14,13 @@ type LogEntry struct {
 func (l *Log) GetLog() []LogEntry {
 	return l.log
 }
+func (l *Log) Copy(left int, right int) []LogEntry {
+	left = left - l.lastIndex - 1
+	right = right - l.lastIndex
+	slice := l.log[left:right]
+	copy := append(make([]LogEntry, 0, len(slice)), slice...)
+	return copy
+}
 func NewLog(lastIndex int, lastTerm int, logs []LogEntry) *Log {
 	return &Log{lastIndex, lastTerm, logs}
 }
@@ -123,26 +130,31 @@ func (rf *Raft) applier() {
 		if rf.killed() {
 			break
 		}
-		rf.mu.Lock()
+
 		rf.applyMsg()
-		rf.mu.Unlock()
 	}
 
 }
 
 func (rf *Raft) applyMsg() {
-	if rf.commitIndex > rf.lastApplied {
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.Debug(dApply, "apply msg(index=%v,term=%v)", i, rf.log.Get(i).Term)
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log.Get(i).Command,
-				CommandIndex: i,
-			}
-			rf.applyCh <- msg
-			rf.lastApplied = i
+	rf.mu.Lock()
+	copy := rf.log.Copy(rf.lastApplied+1, rf.commitIndex)
+	lastIndex := rf.lastApplied + 1
+	me := rf.me
+	DebugPrint(dApply, "[%v] GetLastIncludedIndex=%v,lastApplied=%v", me, rf.lastApplied)
+	rf.mu.Unlock()
+	for i, v := range copy {
+		idx := i + lastIndex
+		DebugPrint(dApply, "[%v] applyMsg: index=%v", me, idx)
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      v.Command,
+			CommandIndex: idx,
 		}
-
+		rf.applyCh <- msg
+		rf.mu.Lock()
+		rf.lastApplied = idx
+		rf.mu.Unlock()
 	}
 }
 

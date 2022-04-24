@@ -19,7 +19,12 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	return true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex == rf.log.GetLastIncludedIndex() && lastIncludedTerm == rf.log.GetLastIncludedTerm() {
+		return true
+	}
+	return false
 	// Your code here (2D).
 	// return true
 }
@@ -30,26 +35,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	go func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if rf.log.GetLastIncludedIndex() >= index || index > rf.log.LatestIndex() {
-			rf.Debug(dSnapshot, "Snapshot %d ignore\n", index)
-			return
-		}
-		rf.Debug(dSnapshot, "Snapshot %d\n", index)
-		lastTerm := rf.log.Get(index).Term
-		rf.log.Reindex(index, lastTerm)
-		rf.snapshot = snapshot
-		rf.persistL()
-		rf.applyCh <- ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      rf.snapshot,
-			SnapshotTerm:  rf.log.GetLastIncludedTerm(),
-			SnapshotIndex: rf.log.GetLastIncludedIndex(),
-		}
-		rf.lastApplied = rf.log.GetLastIncludedIndex()
-	}()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.log.GetLastIncludedIndex() >= index {
+		rf.Debug(dSnapshot, "Snapshot %d ignore\n", index)
+		return
+	}
+	// atomic.StoreInt32(&rf.is_appling, 1)
+	rf.Debug(dSnapshot, "Snapshot %d\n", index)
+	lastTerm := rf.log.Get(index).Term
+	rf.log.Reindex(index, lastTerm)
+	rf.snapshot = snapshot
+	rf.persistL()
+	rf.commitIndex = max(rf.commitIndex, rf.log.GetLastIncludedIndex())
+	rf.lastApplied = max(rf.lastApplied, rf.log.GetLastIncludedIndex())
+	// atomic.StoreInt32(&rf.is_appling, 0)
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
 	rf.mu.Lock()
@@ -75,11 +75,6 @@ func (rf *Raft) SendInstallSnapshot(server int) {
 			rf.Debug(dSnapshot, "%v -> %v; Snapshot Done.Because it's no longer leader\n", rf.me, server)
 			rf.persistL()
 			return
-		} else if reply.Term > args.Term {
-			// failed; but it's still leader
-			// can add retry here
-			rf.Debug(dSnapshot, "%v -> %v; Snapshot retry again", rf.me, server)
-			go rf.SendInstallSnapshot(server)
 		} else {
 			// success
 			rf.matchIndex[server] = max(rf.matchIndex[server], args.LastIncludedIndex)
@@ -102,18 +97,27 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.Debug(dSnapshot, "accept InstallSnapshot(%v->%v)", args.LeaderId, rf.me)
 	// is send by current leader
 	rf.setElectionTimeL() // refresh timer
-	rf.asFollowerL(args.Term)
-	rf.votedFor = args.LeaderId
+	if rf.state != FOLLOWER {
+		rf.asFollowerL(args.Term)
+		rf.votedFor = args.LeaderId
+	}
+	if rf.log.GetLastIncludedIndex() >= args.LastIncludedIndex {
+		rf.Debug(dSnapshot, "Snapshot %d ignore\n", args.LastIncludedIndex)
+		return
+	}
 	rf.snapshot = args.Data
 	rf.log.Reindex(args.LastIncludedIndex, args.LastIncludedTerm)
 	rf.persistL()
 	rf.Debug(dSnapshot, "apply snapshot:index=%v,term:%v\n", args.LastIncludedIndex, args.LastIncludedTerm)
-	rf.applyCh <- ApplyMsg{
+	msg := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
+	go func() {
+		rf.applyCh <- msg
+	}()
 	rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
-	rf.lastApplied = args.LastIncludedIndex
+	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
 }
