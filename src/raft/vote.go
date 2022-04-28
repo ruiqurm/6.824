@@ -63,14 +63,19 @@ func (rf *Raft) electionL() {
 			go rf.sendRequestVote(server, &args, &vote, &done, &cond)
 		}
 	}
-	go rf.leaderLoop(&cond)
+	go rf.leaderLoop(args.Term, &cond)
 }
 
-func (rf *Raft) leaderLoop(cond *sync.Cond) {
+func (rf *Raft) leaderLoop(term int, cond *sync.Cond) {
 	cond.L.Lock()
 	cond.Wait()
 	cond.L.Unlock()
 	rf.mu.Lock()
+	if rf.currentTerm != term {
+		//
+		rf.mu.Unlock()
+		return
+	}
 	// wake up when candidate wins or fails the election
 	for rf.state == LEADER && !rf.killed() {
 		rf.setElectionTimeL()
@@ -93,7 +98,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 	// only when main thread give up lock, we can start to process reply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state != CANDIDATE {
+	if args.Term != rf.currentTerm || rf.state != CANDIDATE {
+		// old term or is not candidate should discard immediately
 		return
 	}
 	if ok {
@@ -104,7 +110,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, vote *int, do
 			*vote += 1
 			if *vote >= len(rf.peers)/2 {
 				// win the elction
-				rf.Debug(dRequestVote, "become leader")
+				rf.Debug(dRequestVote, "become leader of %v", args.Term)
 				rf.asLeaderL()
 				cond.Broadcast()
 			}
@@ -152,6 +158,10 @@ func (rf *Raft) sendAppendEntries(server int) {
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
+		if args.Term != rf.currentTerm {
+			// old term;should discard immediately
+			return
+		}
 		if reply.Term > rf.currentTerm {
 			rf.asFollowerL(reply.Term)
 			rf.persistL()

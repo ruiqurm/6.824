@@ -43,8 +43,8 @@ func (l *Log) GetMany(index int) (e []LogEntry) {
 		// may be no longer leader
 		return nil
 	}
-	right := min(len(l.log), index-l.lastIndex-1+MAX_LOG_PER_REQUEST)
-	return l.log[index-1-l.lastIndex : right]
+	// right := min(len(l.log), index-l.lastIndex-1+MAX_LOG_PER_REQUEST)
+	return l.log[index-1-l.lastIndex:]
 }
 func (l *Log) LatestTerm() (term int) {
 	if len(l.log) == 0 {
@@ -141,11 +141,11 @@ func (rf *Raft) applyMsg() {
 	copy := rf.log.Copy(rf.lastApplied+1, rf.commitIndex)
 	lastIndex := rf.lastApplied + 1
 	me := rf.me
-	DebugPrint(dApply, "[%v] GetLastIncludedIndex=%v,lastApplied=%v", me, rf.lastApplied)
+	// DebugPrint(dApply, "[%v] GetLastIncludedIndex=%v,lastApplied=%v", me, rf.lastApplied)
 	rf.mu.Unlock()
 	for i, v := range copy {
 		idx := i + lastIndex
-		DebugPrint(dApply, "[%v] applyMsg: index=%v", me, idx)
+		DebugPrint(dApply, "[%v] applyMsg: index=%v,term=%v", me, idx, v.Term)
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      v.Command,

@@ -64,7 +64,7 @@ const (
 	ELECTION_MIN_TIMEOUT   = 5 * HEARTBEAT_INTERVAL
 	ELECTION_TIMEOUT_RANGE = 3 * HEARTBEAT_INTERVAL
 	WAKE_UP_INTERVAL       = 50
-	MAX_LOG_PER_REQUEST    = 512
+	// MAX_LOG_PER_REQUEST    = 512
 )
 
 //
@@ -224,7 +224,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	should_persist := false
 	defer rf.checkThenPersistL(&should_persist)
 	if args.Term >= rf.currentTerm {
-		if rf.state != FOLLOWER {
+		if rf.state != FOLLOWER || rf.currentTerm < args.Term {
 			rf.asFollowerL(args.Term)
 			should_persist = true
 		}
@@ -265,7 +265,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		} else {
 			// have been synchronized with leader
-			reply.Success = true
 			if rf.log.Cut(prev_index + 1) {
 				rf.Debug(dLog, "drop log until %v\n", prev_index+1)
 				should_persist = true
@@ -276,6 +275,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				should_persist = true
 			}
 			rf.Debug(dAppendEntry, "AE: %v -> %v,succ\n", args.LeaderId, rf.me)
+			reply.Success = true
 		}
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
@@ -301,11 +301,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// defer rf.persistL()
 	should_persist := false
 	defer rf.checkThenPersistL(&should_persist)
-	n := rf.log.LatestIndex()
+	myLastIndex := rf.log.LatestIndex()
 	lastLogTerm := rf.log.LatestTerm()
 
 	reply.Term = rf.currentTerm
-	rf.setElectionTimeL()
 	if args.Term > rf.currentTerm {
 		rf.asFollowerL(args.Term)
 		rf.votedFor = -1
@@ -319,13 +318,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && // not voted for anyone or voted for the candidate
-		((args.LastLogIndex >= n && lastLogTerm == args.LastLogTerm) || (args.LastLogTerm > lastLogTerm)) {
+		((args.LastLogIndex >= myLastIndex && lastLogTerm == args.LastLogTerm) || (args.LastLogTerm > lastLogTerm)) {
 		rf.Debug(dRequestVote, "RV: %v-> %v,grant vote,rf.votedFor=%v,last_term=%v\n", args.CandidateId, rf.me, rf.votedFor, lastLogTerm)
+		rf.setElectionTimeL()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		should_persist = true
 	} else {
-		rf.Debug(dRequestVote, "RV: %v-> %v,reject;votedFor=%v;args.term=%v,args.lastindex=%v; currentTerm=%v,logindex=%v\n", args.CandidateId, rf.me, rf.votedFor, args.Term, args.LastLogIndex, rf.currentTerm, n)
+		rf.Debug(dRequestVote, "RV: %v-> %v,reject;votedFor=%v log [i:%v;t:%v] compare [i:%v;t:%v]\n", args.CandidateId, rf.me, rf.votedFor, myLastIndex, lastLogTerm, args.LastLogIndex, args.LastLogTerm)
 		reply.VoteGranted = false
 	}
 }
@@ -382,7 +382,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == LEADER {
 		rf.log.Append(LogEntry{rf.currentTerm, command})
 		rf.persistL()
-		rf.Debug(dLog, "log append,index=%v,term%v\n", rf.log.LatestIndex(), rf.currentTerm)
+		rf.Debug(dLog, "log append,index=%v,term=%v\n", rf.log.LatestIndex(), rf.currentTerm)
 	}
 	return rf.log.LatestIndex(), rf.currentTerm, rf.state == LEADER
 }
