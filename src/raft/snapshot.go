@@ -47,8 +47,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.log.Reindex(index, lastTerm)
 	rf.snapshot = snapshot
 	rf.persistL()
-	rf.commitIndex = max(rf.commitIndex, rf.log.GetLastIncludedIndex())
-	rf.lastApplied = max(rf.lastApplied, rf.log.GetLastIncludedIndex())
+	rf.commitIndex = max(rf.commitIndex, index)
+	rf.lastApplied = max(rf.lastApplied, index)
+	UnblockWrite(rf.applyCond, true)
 	// atomic.StoreInt32(&rf.is_appling, 0)
 }
 func (rf *Raft) SendInstallSnapshot(server int) {
@@ -115,9 +116,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-	go func() {
-		rf.applyCh <- msg
-	}()
+	rf.applyCh <- msg
 	rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
 	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	UnblockWrite(rf.applyCond, true)
 }

@@ -129,12 +129,12 @@ func (rf *Raft) sendAppendEntries(server int) {
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.LeaderCommit = rf.commitIndex
-
+	args.Time = time.Now().UnixMicro()
 	prev_index := rf.nextIndex[server] - 1
 	if prev_index < rf.log.GetLastIncludedIndex() {
 		// send
 		go rf.SendInstallSnapshot(server)
-		rf.Debug(dAppendEntry, "%v -> %v SendInstallSnapshot again", rf.me, server)
+		rf.Debug(dAppendEntry, "%v -> %v SendInstallSnapshot(lastInclude=%v)", rf.me, server, rf.log.GetLastIncludedIndex())
 		rf.mu.Unlock()
 		return
 	}
@@ -158,7 +158,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if args.Term != rf.currentTerm {
+		if args.Term != rf.currentTerm || reply.Term < 0 {
 			// old term;should discard immediately
 			return
 		}

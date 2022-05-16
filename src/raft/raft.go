@@ -90,12 +90,12 @@ type Raft struct {
 	// volatile state on all servers
 	commitIndex int
 	lastApplied int
-
+	time        int64
 	// volatile state;for leader
 	nextIndex  []int
 	matchIndex []int
 	applyCh    chan ApplyMsg
-	applyCond  *sync.Cond
+	applyCond  chan bool
 	is_appling int32
 	// snapshot,involatile
 	snapshot []byte
@@ -109,6 +109,11 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == LEADER
+}
+func (rf *Raft) GetLeader() (int, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.votedFor, rf.me
 }
 func (rf *Raft) checkThenPersistL(should_persist *bool) {
 	if *should_persist {
@@ -200,6 +205,7 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
+	Time         int64
 }
 
 type AppendEntriesReply struct {
@@ -218,12 +224,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-
-	rf.setElectionTimeL() // refresh timer
+	if rf.time > args.Time {
+		reply.Term = -1
+		return
+	} else {
+		rf.time = args.Time
+	}
 	reply.Term = rf.currentTerm
-	should_persist := false
-	defer rf.checkThenPersistL(&should_persist)
 	if args.Term >= rf.currentTerm {
+		rf.setElectionTimeL() // refresh timer
+		should_persist := false
+		defer rf.checkThenPersistL(&should_persist)
 		if rf.state != FOLLOWER || rf.currentTerm < args.Term {
 			rf.asFollowerL(args.Term)
 			should_persist = true
@@ -235,6 +246,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// defer rf.persistL()
 		// check log
 		prev_index := args.PrevLogIndex // index of the first log entry not yet applied
+		if prev_index < rf.log.GetLastIncludedIndex() {
+			// before snapshot point; must be success
+			rf.Debug(dAppendEntry, "prev_index < rf.log.GetLastIncludedIndex()")
+			reply.Term = -1
+			return
+		}
 		if rf.log.LatestIndex() < prev_index {
 			reply.Success = false
 			reply.XTerm = -1
@@ -264,6 +281,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				should_persist = true
 			}
 		} else {
+			// if len(args.Entries) > 0 && (prev_index+len(args.Entries) <= rf.commitIndex || prev_index+len(args.Entries) <= rf.log.LatestIndex()) {
+			// 	// stale message
+			// 	rf.Debug(dAppendEntry, "unorder")
+			// 	reply.Term = -1
+			// 	return
+			// }
 			// have been synchronized with leader
 			if rf.log.Cut(prev_index + 1) {
 				rf.Debug(dLog, "drop log until %v\n", prev_index+1)
@@ -274,14 +297,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.log.Append(args.Entries...)
 				should_persist = true
 			}
-			rf.Debug(dAppendEntry, "AE: %v -> %v,succ\n", args.LeaderId, rf.me)
+			rf.Debug(dAppendEntry, "AE: %v -> %v,previndex=%v,prev_term=%v,succ\n", args.LeaderId, rf.me, args.PrevLogIndex, args.PrevLogTerm)
 			reply.Success = true
-		}
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
-		}
-		if reply.Success && rf.commitIndex > rf.lastApplied {
-			rf.applyCond.Broadcast()
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = min(rf.log.LatestIndex(), args.LeaderCommit)
+			}
+			if rf.commitIndex > rf.lastApplied {
+				UnblockWrite(rf.applyCond, true)
+			}
 		}
 	} else {
 		reply.Success = false
@@ -382,6 +405,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state == LEADER {
 		rf.log.Append(LogEntry{rf.currentTerm, command})
 		rf.persistL()
+		rf.heartBeat()
 		rf.Debug(dLog, "log append,index=%v,term=%v\n", rf.log.LatestIndex(), rf.currentTerm)
 	}
 	return rf.log.LatestIndex(), rf.currentTerm, rf.state == LEADER
@@ -403,7 +427,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.applyCond.Broadcast()
+	UnblockWrite(rf.applyCond, false)
 	// rf.currentTerm = 0
 	// rf.votedFor = -1
 	// rf.state = FOLLOWER
@@ -457,8 +481,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.applyCond = sync.NewCond(&sync.Mutex{})
+	rf.applyCond = make(chan bool)
 	rf.is_appling = 0
+	rf.time = time.Now().UnixMicro()
 	data := persister.ReadRaftState()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rf.votedFor = -1

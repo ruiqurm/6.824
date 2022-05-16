@@ -75,7 +75,7 @@ func (rf *Raft) Debug(topic logTopic, format string, a ...interface{}) {
 		state = "L"
 	}
 	append_str := fmt.Sprintf(format, a...)
-	DebugPrint(topic, "[%v] t=%v,log=%v,len=%v,%v %v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), state, append_str)
+	DebugPrint(topic, "[%v] t=%v,log=%v,len=%v,la=%v,%v %v", rf.me, rf.currentTerm, rf.log.LatestIndex(), rf.log.Len(), rf.lastApplied, state, append_str)
 }
 
 func (rf *Raft) report_indexL() {
@@ -127,4 +127,12 @@ func bineary_search(array []int, value int) int {
 		}
 	}
 	return l
+}
+
+func UnblockWrite(ch chan bool, v bool) {
+	select {
+	case ch <- v:
+	default:
+		// throw away
+	}
 }

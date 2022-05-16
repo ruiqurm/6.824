@@ -1,5 +1,7 @@
 package raft
 
+import "time"
+
 type Log struct {
 	lastIndex int
 	lastTerm  int
@@ -112,10 +114,8 @@ func (rf *Raft) updateL() {
 				count++
 			}
 			if count >= len(rf.peers)/2 {
-
 				rf.commitIndex = i // commited successfully
-				rf.applyCond.Broadcast()
-
+				UnblockWrite(rf.applyCond, true)
 				break
 			}
 		}
@@ -124,20 +124,42 @@ func (rf *Raft) updateL() {
 
 func (rf *Raft) applier() {
 	for !rf.killed() {
-		rf.applyCond.L.Lock()
-		rf.applyCond.Wait()
-		rf.applyCond.L.Unlock()
-		if rf.killed() {
-			break
+		select {
+		case is_new_msg := <-rf.applyCond:
+			if is_new_msg {
+				rf.applyMsg()
+			}
+		case <-time.After(time.Millisecond * 200):
+			// rf.applyMsg()
 		}
-
-		rf.applyMsg()
 	}
 
 }
 
+// func (rf *Raft) applyMsg() {
+// 	rf.mu.Lock()
+// 	if rf.lastApplied >= rf.commitIndex {
+// 		rf.mu.Unlock()
+// 		return
+// 	}
+// 	applyIndex := rf.lastApplied + 1
+// 	rf.Debug(dApply, "applyMsg: index=%v,term=%v", applyIndex, rf.log.GetTerm(applyIndex))
+// 	msg := ApplyMsg{
+// 		CommandValid: true,
+// 		Command:      rf.log.Get(applyIndex).Command,
+// 		CommandIndex: applyIndex,
+// 	}
+// 	rf.lastApplied = applyIndex
+// 	rf.mu.Unlock()
+// 	rf.applyCh <- msg
+// }
+
 func (rf *Raft) applyMsg() {
 	rf.mu.Lock()
+	if rf.lastApplied >= rf.commitIndex {
+		rf.mu.Unlock()
+		return
+	}
 	copy := rf.log.Copy(rf.lastApplied+1, rf.commitIndex)
 	lastIndex := rf.lastApplied + 1
 	me := rf.me
@@ -153,7 +175,13 @@ func (rf *Raft) applyMsg() {
 		}
 		rf.applyCh <- msg
 		rf.mu.Lock()
-		rf.lastApplied = idx
+		if rf.lastApplied+1 != idx {
+			// rf.lastApplied has changed
+			rf.mu.Unlock()
+			return
+		} else {
+			rf.lastApplied++
+		}
 		rf.mu.Unlock()
 	}
 }
