@@ -1,6 +1,9 @@
 package raft
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 type Log struct {
 	lastIndex int
@@ -130,7 +133,7 @@ func (rf *Raft) applier() {
 				rf.applyMsg()
 			}
 		case <-time.After(time.Millisecond * 200):
-			// rf.applyMsg()
+			rf.applyMsg()
 		}
 	}
 
@@ -167,18 +170,23 @@ func (rf *Raft) applyMsg() {
 	rf.mu.Unlock()
 	for i, v := range copy {
 		idx := i + lastIndex
-		DebugPrint(dApply, "[%v] applyMsg: index=%v,term=%v", me, idx, v.Term)
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      v.Command,
 			CommandIndex: idx,
 		}
+		DebugPrint(dApply, "[%v] applyMsg: index=%v,term=%v", me, idx, v.Term)
 		rf.applyCh <- msg
 		rf.mu.Lock()
 		if rf.lastApplied+1 != idx {
 			// rf.lastApplied has changed
 			rf.mu.Unlock()
-			return
+			for {
+				time.Sleep(time.Duration(100) * time.Millisecond)
+				if atomic.LoadInt32(&rf.waitSnapshot) == 0 {
+					return
+				}
+			}
 		} else {
 			rf.lastApplied++
 		}

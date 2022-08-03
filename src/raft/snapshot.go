@@ -1,5 +1,7 @@
 package raft
 
+import "sync/atomic"
+
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -89,10 +91,10 @@ func (rf *Raft) SendInstallSnapshot(server int) {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	// Your code here (2D).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		rf.Debug(dSnapshot, "rejct InstallSnapshot(%v->%v)", args.LeaderId, rf.me)
+		rf.mu.Unlock()
 		return
 	}
 	rf.Debug(dSnapshot, "accept InstallSnapshot(%v->%v)", args.LeaderId, rf.me)
@@ -104,20 +106,28 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	if rf.log.GetLastIncludedIndex() >= args.LastIncludedIndex {
 		rf.Debug(dSnapshot, "Snapshot %d ignore\n", args.LastIncludedIndex)
+		rf.mu.Unlock()
 		return
 	}
 	rf.snapshot = args.Data
 	rf.log.Reindex(args.LastIncludedIndex, args.LastIncludedTerm)
 	rf.persistL()
 	rf.Debug(dSnapshot, "apply snapshot:index=%v,term:%v\n", args.LastIncludedIndex, args.LastIncludedTerm)
-	msg := ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex,
+	if rf.lastApplied < args.LastIncludedIndex {
+		msg := ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+		rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
+		rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+		atomic.StoreInt32(&rf.waitSnapshot, 1)
+		rf.mu.Unlock()
+		rf.applyCh <- msg
+		atomic.StoreInt32(&rf.waitSnapshot, 0)
+		UnblockWrite(rf.applyCond, true)
+	} else {
+		rf.mu.Unlock()
 	}
-	rf.applyCh <- msg
-	rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
-	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
-	UnblockWrite(rf.applyCond, true)
 }
