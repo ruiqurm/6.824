@@ -1,7 +1,5 @@
 package raft
 
-import "sync/atomic"
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -106,6 +104,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	if rf.log.GetLastIncludedIndex() >= args.LastIncludedIndex {
 		rf.Debug(dSnapshot, "Snapshot %d ignore\n", args.LastIncludedIndex)
+		// atomic.StoreInt32(&rf.waitSnapshot, 0)
 		rf.mu.Unlock()
 		return
 	}
@@ -122,10 +121,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		}
 		rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
 		rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
-		atomic.StoreInt32(&rf.waitSnapshot, 1)
+		// atomic.StoreInt32(&rf.waitSnapshot, 1)
+		rf.waitSnapshot.Lock()
 		rf.mu.Unlock()
 		rf.applyCh <- msg
-		atomic.StoreInt32(&rf.waitSnapshot, 0)
+		rf.waitSnapshot.Unlock()
 		UnblockWrite(rf.applyCond, true)
 	} else {
 		rf.mu.Unlock()

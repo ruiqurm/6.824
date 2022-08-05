@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"sync/atomic"
 	"time"
 )
 
@@ -130,10 +129,14 @@ func (rf *Raft) applier() {
 		select {
 		case is_new_msg := <-rf.applyCond:
 			if is_new_msg {
+				// rf.waitSnapshot.Lock()
 				rf.applyMsg()
+				// rf.waitSnapshot.Unlock()
 			}
 		case <-time.After(time.Millisecond * 200):
+			// 	rf.waitSnapshot.Lock()
 			rf.applyMsg()
+			// 	rf.waitSnapshot.Unlock()
 		}
 	}
 
@@ -176,21 +179,25 @@ func (rf *Raft) applyMsg() {
 			CommandIndex: idx,
 		}
 		DebugPrint(dApply, "[%v] applyMsg: index=%v,term=%v", me, idx, v.Term)
-		rf.applyCh <- msg
+		// for atomic.LoadInt32(&rf.waitSnapshot) != 0 {
+		// 	time.Sleep(50 * time.Millisecond)
+		// }
 		rf.mu.Lock()
 		if rf.lastApplied+1 != idx {
 			// rf.lastApplied has changed
 			rf.mu.Unlock()
-			for {
-				time.Sleep(time.Duration(100) * time.Millisecond)
-				if atomic.LoadInt32(&rf.waitSnapshot) == 0 {
-					return
-				}
-			}
+			// rf.waitSnapshot.Unlock()
+			return
 		} else {
 			rf.lastApplied++
 		}
+		rf.waitSnapshot.Lock()
 		rf.mu.Unlock()
+		rf.applyCh <- msg
+		rf.waitSnapshot.Unlock()
+		// rf.waitSnapshot.Lock()
+
+		// rf.waitSnapshot.Unlock()
 	}
 }
 
