@@ -18,10 +18,13 @@ func concat(a string, b string) string {
 type logTopic string
 
 const (
-	CACT logTopic = "CACT" // client action
+	CFIN logTopic = "CFIN" // Client find server
+	CSET logTopic = "CSET" // client set
+	CGET logTopic = "CGET" // client get
 	SSET logTopic = "SSET" // server set
 	SGET logTopic = "SGET" // server get
 	SAPL logTopic = "SAPL" // server append
+
 )
 
 func getVerbosity() int {
@@ -48,7 +51,9 @@ func init() {
 }
 
 func DebugPrint(topic logTopic, format string, a ...interface{}) {
-	if debugVerbosity >= 0 {
+	if debugVerbosity >= 3 ||
+		(debugVerbosity == 1 && (topic == CFIN || topic == CSET || topic == CGET)) ||
+		(debugVerbosity == 2 && (topic == SSET || topic == SGET || topic == SAPL)) {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
@@ -61,3 +66,18 @@ func (kv *KVServer) Debug(topic logTopic, format string, a ...interface{}) {
 	append_str := fmt.Sprintf(format, a...)
 	DebugPrint(topic, "[%v] %s", kv.me, append_str)
 }
+
+// func abbreviate_string(data string) string {
+// 	/// if string length is longer than 16, then return the last 16 characters
+// 	m := len(data)
+// 	if m >= 16 {
+// 		return data[m-16 : m]
+// 	} else {
+// 		return data
+// 	}
+// }
+
+// func make_snow_id(client_id int16) int64{
+// 	/// snowflake algorithm
+// 	return 0 | (time.Now().UnixNano() << 23 >> 1) | (int64(client_id) << 12) |  ()
+// }
