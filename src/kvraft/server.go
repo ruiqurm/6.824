@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -31,16 +30,16 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Action int
-	Key    string
-	Value  string
-	// Time   int64
+	Action        int
+	Key           string
+	Value         string
+	Verified_code int64
 }
 
-// type ValueStruct struct {
-// 	Value      string
-// 	ChangeTime int64
-// }
+type WaitingStruct struct {
+	Value         string
+	Verified_code int64
+}
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -53,12 +52,12 @@ type KVServer struct {
 	// Your definitions here.
 	data map[string]string
 	// commitIndex int32
-	waiting   map[int32]chan string
+	waiting   map[int32]chan WaitingStruct
 	check_map map[int16]int64
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	index, _, isLeader := kv.rf.Start(Op{ACTION_GET, args.Key, ""})
+	index, _, isLeader := kv.rf.Start(Op{ACTION_GET, args.Key, "", args.Sf})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -68,10 +67,17 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	ch := kv.getWaitingChanL(int32(index))
 	kv.mu.Unlock()
 	select {
-	case v := <-ch:
-		kv.Debug(SGET, "get %v done", args.Key)
-		reply.Err = OK
-		reply.Value = v
+	case ws := <-ch:
+		if ws.Verified_code != args.Sf {
+			// commit failed(beacuse it's no longer leader)
+			reply.Err = ErrWrongLeader
+			kv.Debug(SGET, "get %v stale", args.Key)
+		} else {
+			reply.Err = OK
+			reply.Value = ws.Value
+			kv.Debug(SGET, "get %v done", args.Key)
+		}
+
 	case <-time.After(time.Millisecond * 2000):
 		reply.Err = ErrWrongLeader
 		kv.Debug(SGET, "timeout")
@@ -89,7 +95,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// check and avoid client send same request twice
 	kv.mu.Lock()
-	if saved_ts, ok := kv.check_map[args.Sf.Client]; ok && saved_ts >= args.Sf.Timestamp {
+	client := get_client_from_snowflake(args.Sf)
+	timestamp := get_timestamp_from_snowflake(args.Sf)
+	if saved_ts, ok := kv.check_map[client]; ok && saved_ts >= timestamp {
 		// if it is an old client and the request timestamp larger than the saved timestamp
 		// set error type as ErrStale to terminate client loop.
 		kv.mu.Unlock()
@@ -98,7 +106,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	// if it is a new client, no need to detect.
 	// we will add the time stamp to the map later on.
-	kv.mu.Unlock()
 
 	var action int
 	if args.Op == "Put" {
@@ -110,18 +117,17 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	// call `Start` to commit a new Operation.
-	index, _, isLeader := kv.rf.Start(Op{action, args.Key, args.Value})
+	index, _, isLeader := kv.rf.Start(Op{action, args.Key, args.Value, args.Sf})
 
 	// if it is not a leader, set error type as ErrWrongLeader to ask client to find real leader.
 	if !isLeader {
+		kv.mu.Unlock()
 		kv.Debug(SSET, "Start failed; not a leader")
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	// set check_map and get a waiting channel, which will notify the server when it has handled by applier
-	kv.mu.Lock()
-	kv.check_map[args.Sf.Client] = args.Sf.Timestamp
 	ch := kv.getWaitingChanL(int32(index))
 	kv.mu.Unlock()
 	if action == ACTION_PUT {
@@ -132,8 +138,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	// wait for servers to commit the message
 	select {
-	case <-ch:
-		reply.Err = OK
+	case ws := <-ch:
+		if ws.Verified_code != args.Sf {
+			// commit failed(beacuse it's no longer leader)
+			reply.Err = ErrWrongLeader
+			kv.Debug(DEBG, "set stale")
+		} else {
+			reply.Err = OK
+			kv.Debug(DEBG, "set ok")
+		}
 	case <-time.After(time.Millisecond * 2000):
 		reply.Err = ErrTimeout
 		kv.Debug(SSET, "set timeout; failed")
@@ -160,39 +173,50 @@ func (kv *KVServer) applier() {
 				// 	atomic.StoreInt32(&kv.commitIndex, int32(msg.CommandIndex))
 				kv.mu.Lock()
 				op := msg.Command.(Op)
-
+				client := get_client_from_snowflake(op.Verified_code)
+				timestamp := get_timestamp_from_snowflake(op.Verified_code)
+				stale := false
 				ret := ""
-				switch op.Action {
-				case ACTION_PUT:
-					kv.data[op.Key] = op.Value
-					kv.Debug(SAPL, "ack msg  set [%v]= %v", op.Key, op.Value)
-				case ACTION_APPEND:
-					if v, ok := kv.data[op.Key]; ok {
-						kv.data[op.Key] = concat(v, op.Value)
-					} else {
-						kv.data[op.Key] = op.Value
-					}
-					kv.Debug(SAPL, "ack msg  append [%v]= %v", op.Key, op.Value)
-				case ACTION_GET:
-					// do nothing
-					if v, ok := kv.data[op.Key]; ok {
-						ret = v
-					}
-					// else ret is empty string
-					kv.Debug(SAPL, "ack msg  get[%v]=%v", op.Key, ret)
-				default:
-					panic("unknow action")
-				}
 
-				_, isLeader := kv.rf.GetState()
-				if isLeader {
-					ch := kv.getWaitingChanL(int32(msg.CommandIndex))
-					kv.mu.Unlock()
-					ch <- ret
-				} else {
-					kv.mu.Unlock()
+				if op.Action == ACTION_APPEND || op.Action == ACTION_PUT {
+					// must exist
+					vc := kv.check_map[client]
+					if vc >= timestamp {
+						// stale
+						stale = true
+						kv.Debug(DEBG, "stale!!!!!, key= %v,client=%v", op.Key, client)
+					} else {
+						kv.check_map[client] = timestamp
+					}
 				}
-				// }
+				if !stale {
+					switch op.Action {
+					case ACTION_PUT:
+						kv.data[op.Key] = op.Value
+						kv.Debug(SAPL, "ack msg set [%v]= %v", op.Key, op.Value)
+					case ACTION_APPEND:
+						if v, ok := kv.data[op.Key]; ok {
+							kv.data[op.Key] = concat(v, op.Value)
+						} else {
+							kv.data[op.Key] = op.Value
+						}
+						kv.Debug(SAPL, "ack msg append [%v]= %v", op.Key, op.Value)
+					case ACTION_GET:
+						// do nothing
+						if v, ok := kv.data[op.Key]; ok {
+							ret = v
+						}
+						// else ret is empty string
+						kv.Debug(SAPL, "ack msg get [%v]=%v", op.Key, ret)
+					default:
+						panic("unknow action")
+					}
+				}
+				ch, ok := kv.waiting[int32(msg.CommandIndex)]
+				kv.mu.Unlock()
+				if ok {
+					ch <- WaitingStruct{Value: ret, Verified_code: op.Verified_code}
+				}
 			} else if msg.SnapshotValid {
 			}
 		case <-time.After(time.Millisecond * 2000): // avoid blocking
@@ -200,17 +224,16 @@ func (kv *KVServer) applier() {
 			// fmt.Printf("%v timeout!!!\n", kv.me)
 		}
 	}
-	fmt.Printf("%v killed!!!\n", kv.me)
+	// fmt.Printf("%v killed!!!\n", kv.me)
 }
 
-func (kv *KVServer) getWaitingChanL(index int32) chan string {
+func (kv *KVServer) getWaitingChanL(index int32) chan WaitingStruct {
 	ch, ok := kv.waiting[index]
 	if !ok {
-		ch = make(chan string)
+		ch = make(chan WaitingStruct)
 		kv.waiting[index] = ch
 	}
 	return ch
-
 }
 
 //
@@ -264,7 +287,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
 	// kv.clients = make(map[int16]int64)
-	kv.waiting = make(map[int32]chan string)
+	kv.waiting = make(map[int32]chan WaitingStruct)
 	kv.check_map = make(map[int16]int64)
 	go kv.applier()
 	return kv

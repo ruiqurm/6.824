@@ -195,9 +195,6 @@ func (rf *Raft) applyMsg() {
 		rf.mu.Unlock()
 		rf.applyCh <- msg
 		rf.waitSnapshot.Unlock()
-		// rf.waitSnapshot.Lock()
-
-		// rf.waitSnapshot.Unlock()
 	}
 }
 

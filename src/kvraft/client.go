@@ -52,20 +52,24 @@ func (ck *Clerk) Get(key string) string {
 	serverIndex := ck.findLeaderL()
 	server := ck.index2server[serverIndex]
 	ck.mu.Unlock()
-	DebugPrint(CGET, "GET %v", key)
+	ck.Debug(CGET, "GET %v", key)
 	reply := GetReply{}
 	for {
 		ok := ck.servers[server].Call("KVServer.Get", &GetArgs{Key: key, Sf: make_snowflake(int16(ck.id))}, &reply)
 		if ok {
-			if reply.Err == OK {
-				DebugPrint(CGET, "GET [%v]=%v", key, reply.Value)
+			switch reply.Err {
+			case OK:
+				ck.Debug(CGET, "GET [%v]=%v", key, reply.Value)
 				return reply.Value
-			} else {
-				DebugPrint(CGET, "GET [%v] is empty", key)
-				return ""
+			case ErrWrongLeader:
+				ck.mu.Lock()
+				ck.resetLeaderL()
+				serverIndex = ck.findLeaderL()
+				server = ck.index2server[serverIndex]
+				ck.mu.Unlock()
 			}
 		}
-		DebugPrint(CGET, "%v failed to get key=(%v because of rpc error", ck.id, key)
+		ck.Debug(CGET, "failed to get key=%v because of rpc error", key)
 		time.Sleep(time.Microsecond * 100)
 	}
 }
@@ -89,29 +93,30 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{key, value, op, make_snowflake(int16(ck.id))}
 	for {
 		reply := PutAppendReply{}
-		DebugPrint(CSET, "%v put append to %v,[%v]=%v", ck.id, server, key, value)
+		ck.Debug(CSET, "put append to %v,[%v]=%v", serverIndex, key, value)
 		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			switch reply.Err {
 			case OK:
-				DebugPrint(CSET, "%v put append to %v,[%v]=%v succ", ck.id, server, key, value)
+				ck.Debug(CSET, "successfully put append key %v to server %v", key, serverIndex)
 				return
 			case ErrStale:
-				DebugPrint(CSET, "%v redundantly put %v; quit", ck.id, server, key)
+				ck.Debug(CSET, "redundantly put key (%v) to server %v", key, serverIndex)
 				return
-			case ErrWrongLeader:
-				DebugPrint(CSET, "%v failed to put (%v) because of wrong leader", ck.id, key)
+			case ErrWrongLeader, ErrTimeout:
+				ck.Debug(CSET, "failed to put key (%v) to %v server(wrong leader)", key, serverIndex)
 				ck.mu.Lock()
 				ck.resetLeaderL()
-				serverIndex := ck.findLeaderL()
+				serverIndex = ck.findLeaderL()
 				server = ck.index2server[serverIndex]
 				ck.mu.Unlock()
 			default:
+				ck.Debug(CSET, "panic on 'put append to %v,[%v]=%v'", serverIndex, key, value)
 				panic("Unknown Error type")
 			}
 		} else {
 			// failed because of network reason
-			DebugPrint(CSET, "%v failed to put key=%v because of rpc error", ck.id, key)
+			ck.Debug(CSET, "failed to put key=%v to server %v (rpc error)", key, serverIndex)
 			time.Sleep(time.Microsecond * 100)
 		}
 	}
@@ -158,7 +163,7 @@ func (ck *Clerk) findLeaderL() int {
 		}
 		if max_one != -1 {
 			// found a leader
-			DebugPrint(CFIN, "client %v found a leader: %v(%v)", ck.id, max_one, max_result)
+			ck.Debug(CFIN, "found a leader: %v", max_one)
 			ck.leader = max_one
 			return max_one
 		}

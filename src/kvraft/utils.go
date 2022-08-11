@@ -24,7 +24,7 @@ const (
 	SSET logTopic = "SSET" // server set
 	SGET logTopic = "SGET" // server get
 	SAPL logTopic = "SAPL" // server append
-
+	DEBG logTopic = "DEBUG"
 )
 
 func getVerbosity() int {
@@ -45,6 +45,7 @@ var debugVerbosity int
 
 func init() {
 	debugVerbosity = getVerbosity()
+	fmt.Printf("debugVerbosity=%v\n", debugVerbosity)
 	debugStart = time.Now()
 
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
@@ -64,7 +65,11 @@ func DebugPrint(topic logTopic, format string, a ...interface{}) {
 
 func (kv *KVServer) Debug(topic logTopic, format string, a ...interface{}) {
 	append_str := fmt.Sprintf(format, a...)
-	DebugPrint(topic, "[%v] %s", kv.me, append_str)
+	DebugPrint(topic, "kvs[%v] %s", kv.me, append_str)
+}
+func (ck *Clerk) Debug(topic logTopic, format string, a ...interface{}) {
+	append_str := fmt.Sprintf(format, a...)
+	DebugPrint(topic, "client[%v] %s", ck.id, append_str)
 }
 
 // func abbreviate_string(data string) string {
