@@ -1,7 +1,8 @@
 package kvraft
 
 import (
-	"math/rand"
+	"crypto/rand"
+	"math/big"
 	"sync"
 	"time"
 
@@ -13,25 +14,25 @@ type Clerk struct {
 	// You will have to modify this struct.
 	mu           sync.Mutex
 	leader       int
-	id           int
+	id           int64
 	index2server []int
 }
 
-// func nrand() int64 {
-// 	max := big.NewInt(int64(1) << 62)
-// 	bigx, _ := rand.Int(rand.Reader, max)
-// 	x := bigx.Int64()
-// 	return x
-// }
+func nrand() int64 {
+	max := big.NewInt(int64(1) << 62)
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
+}
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	rand.Seed(time.Now().UnixNano())
-	ck.leader = -1
+	init_snowflake()
+	ck.resetLeaderL()
 	ck.index2server = make([]int, len(servers))
-	ck.id = int(rand.Intn(1024))
+	ck.id = nrand()
 	return ck
 }
 
@@ -51,25 +52,30 @@ func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
 	serverIndex := ck.findLeaderL()
 	server := ck.index2server[serverIndex]
+	sf := time.Now().UnixMilli()
 	ck.mu.Unlock()
 	ck.Debug(CGET, "GET %v", key)
-	reply := GetReply{}
 	for {
-		ok := ck.servers[server].Call("KVServer.Get", &GetArgs{Key: key, Sf: make_snowflake(int16(ck.id))}, &reply)
+		reply := GetReply{}
+		ck.Debug(CGET, "get  %v,[%v],ts=%v", serverIndex, key, sf)
+		ok := ck.servers[server].Call("KVServer.Get", &GetArgs{Key: key, Sf: sf, Client: ck.id}, &reply)
 		if ok {
-			switch reply.Err {
-			case OK:
+			if reply.Err == OK {
 				ck.Debug(CGET, "GET [%v]=%v", key, reply.Value)
 				return reply.Value
-			case ErrWrongLeader:
-				ck.mu.Lock()
-				ck.resetLeaderL()
-				serverIndex = ck.findLeaderL()
-				server = ck.index2server[serverIndex]
-				ck.mu.Unlock()
+			} else if reply.Err == ErrWrongLeader {
+				ck.Debug(CGET, "failed to get [%v](Leader Error)", key)
+			} else if reply.Err == ErrTimeout {
+				ck.Debug(CGET, "failed to get [%v](Timeout)", key)
 			}
+		} else {
+			ck.Debug(CGET, "failed to get [%v](rpc error)", key)
 		}
-		ck.Debug(CGET, "failed to get key=%v because of rpc error", key)
+		ck.mu.Lock()
+		ck.resetLeaderL()
+		serverIndex = ck.findLeaderL()
+		server = ck.index2server[serverIndex]
+		ck.mu.Unlock()
 		time.Sleep(time.Microsecond * 100)
 	}
 }
@@ -89,11 +95,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
 	serverIndex := ck.findLeaderL()
 	server := ck.index2server[serverIndex]
+	args := PutAppendArgs{key, value, op, time.Now().UnixNano(), ck.id}
 	ck.mu.Unlock()
-	args := PutAppendArgs{key, value, op, make_snowflake(int16(ck.id))}
+	// ts := get_timestamp_from_snowflake(args.Sf)
 	for {
 		reply := PutAppendReply{}
-		ck.Debug(CSET, "put append to %v,[%v]=%v", serverIndex, key, value)
+		ck.Debug(CSET, "%v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
 		ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			switch reply.Err {
@@ -105,11 +112,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				return
 			case ErrWrongLeader, ErrTimeout:
 				ck.Debug(CSET, "failed to put key (%v) to %v server(wrong leader)", key, serverIndex)
-				ck.mu.Lock()
-				ck.resetLeaderL()
-				serverIndex = ck.findLeaderL()
-				server = ck.index2server[serverIndex]
-				ck.mu.Unlock()
 			default:
 				ck.Debug(CSET, "panic on 'put append to %v,[%v]=%v'", serverIndex, key, value)
 				panic("Unknown Error type")
@@ -117,8 +119,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		} else {
 			// failed because of network reason
 			ck.Debug(CSET, "failed to put key=%v to server %v (rpc error)", key, serverIndex)
-			time.Sleep(time.Microsecond * 100)
+
 		}
+		ck.mu.Lock()
+		ck.resetLeaderL()
+		serverIndex = ck.findLeaderL()
+		server = ck.index2server[serverIndex]
+		ck.mu.Unlock()
+		time.Sleep(time.Microsecond * 100)
 	}
 }
 func (ck *Clerk) resetLeaderL() {

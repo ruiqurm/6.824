@@ -1,0 +1,4 @@
+github.com/bitactro/UUIDv4 v0.0.0-20220313143507-9a5732793937 h1:00sDJBJKhcYaziJl1XDd/1Qa0SJYRrN0BgK1z39Hdsc=
+github.com/bitactro/UUIDv4 v0.0.0-20220313143507-9a5732793937/go.mod h1:7KBT0S0ZdxeZDER0ChWwTNYy00nCR3xKhn00eqGOpDU=
+github.com/google/uuid v1.3.0 h1:t6JiXgmwXMjEs8VusXIJk2BXHsn+wx8BZdTaoZ5fu7I=
+github.com/google/uuid v1.3.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=

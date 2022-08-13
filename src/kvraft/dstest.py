@@ -107,6 +107,7 @@ def run_test(test: str, race: bool, timing: bool):
     if timing:
         test_cmd = ["time"] + cmd
     f, path = tempfile.mkstemp()
+    print(path)
     start = time.time()
     proc = subprocess.run(test_cmd, stdout=f, stderr=f)
     runtime = time.time() - start
@@ -130,7 +131,7 @@ def run_tests(
     workers: int           = typer.Option(1,      '--workers',         '-p',    help='Number of parallel tasks'),
     iterations: int        = typer.Option(10,     '--iter',            '-n',    help='Number of iterations to run'),
     output: Optional[Path] = typer.Option(None,   '--output',          '-o',    help='Output path to use'),
-    verbose: int           = typer.Option(0,      '--verbose',         '-v',    help='Verbosity level', count=True),
+    verbose: int           = typer.Option(0,      '--verbose',         '-v',    help='Verbosity level'),
     archive: bool          = typer.Option(False,  '--archive',         '-a',    help='Save all logs intead of only failed ones'),
     race: bool             = typer.Option(False,  '--race/--no-race',  '-r/-R', help='Run with race checker'),
     loop: bool             = typer.Option(False,  '--loop',            '-l',    help='Run continuously'),
@@ -149,7 +150,6 @@ def run_tests(
     if verbose > 0:
         print(f"[yellow] Verbosity level set to {verbose}[/yellow]")
         os.environ['VERBOSE'] = str(verbose)
-
     while True:
 
         total = iterations * len(tests)
