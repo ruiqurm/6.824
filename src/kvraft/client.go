@@ -54,14 +54,14 @@ func (ck *Clerk) Get(key string) string {
 	server := ck.index2server[serverIndex]
 	sf := time.Now().UnixMilli()
 	ck.mu.Unlock()
-	ck.Debug(CGET, "GET %v", key)
 	for {
+		// It should create a new reply instance every loop
 		reply := GetReply{}
 		ck.Debug(CGET, "get  %v,[%v],ts=%v", serverIndex, key, sf)
 		ok := ck.servers[server].Call("KVServer.Get", &GetArgs{Key: key, Sf: sf, Client: ck.id}, &reply)
 		if ok {
 			if reply.Err == OK {
-				ck.Debug(CGET, "GET [%v]=%v", key, reply.Value)
+				ck.Debug(CGET, "get [%v] successfully, %v", key, reply.Value)
 				return reply.Value
 			} else if reply.Err == ErrWrongLeader {
 				ck.Debug(CGET, "failed to get [%v](Leader Error)", key)
@@ -71,6 +71,7 @@ func (ck *Clerk) Get(key string) string {
 		} else {
 			ck.Debug(CGET, "failed to get [%v](rpc error)", key)
 		}
+		// try to get another new leader
 		ck.mu.Lock()
 		ck.resetLeaderL()
 		serverIndex = ck.findLeaderL()
@@ -105,22 +106,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if ok {
 			switch reply.Err {
 			case OK:
-				ck.Debug(CSET, "successfully put append key %v to server %v", key, serverIndex)
+				ck.Debug(CSET, "successfully %v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
 				return
 			case ErrStale:
-				ck.Debug(CSET, "redundantly put key (%v) to server %v", key, serverIndex)
+				ck.Debug(CSET, "successfully(Errstale) to %v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
 				return
-			case ErrWrongLeader, ErrTimeout:
-				ck.Debug(CSET, "failed to put key (%v) to %v server(wrong leader)", key, serverIndex)
+			case ErrWrongLeader:
+				ck.Debug(CSET, "failed(ErrWrongLeader) to %v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
+			case ErrTimeout:
+				ck.Debug(CSET, "failed(ErrTimeout) to %v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
 			default:
 				ck.Debug(CSET, "panic on 'put append to %v,[%v]=%v'", serverIndex, key, value)
 				panic("Unknown Error type")
 			}
 		} else {
 			// failed because of network reason
-			ck.Debug(CSET, "failed to put key=%v to server %v (rpc error)", key, serverIndex)
-
+			ck.Debug(CSET, "failed(rpc error) to %v to %v,[%v]=%v,ts=%v", op, serverIndex, key, value, args.Sf)
 		}
+		// try to get another new leader
 		ck.mu.Lock()
 		ck.resetLeaderL()
 		serverIndex = ck.findLeaderL()

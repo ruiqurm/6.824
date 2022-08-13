@@ -187,8 +187,6 @@ func (kv *KVServer) applier() {
 		select {
 		case msg := <-kv.applyCh:
 			if msg.CommandValid {
-				// if int32(msg.CommandIndex) > atomic.LoadInt32(&kv.commitIndex) {
-				// 	atomic.StoreInt32(&kv.commitIndex, int32(msg.CommandIndex))
 				kv.mu.Lock()
 				op := msg.Command.(Op)
 				client := op.Client
@@ -236,14 +234,13 @@ func (kv *KVServer) applier() {
 					ws.Client = op.Client
 					ws.Value = ret
 					ws.Verified_code = op.Verified_code
-				} else {
-					kv.Debug(SAPL, "not found index=%v DONE", msg.CommandIndex)
+					close(ws.Committed)
 				}
 				kv.mu.Unlock()
-				if ok {
-					close(ws.Committed)
-					kv.Debug(SAPL, "index=%v DONE", msg.CommandIndex)
-				}
+				// if ok {
+				// 	close(ws.Committed)
+				// 	kv.Debug(SAPL, "index=%v DONE", msg.CommandIndex)
+				// }
 
 			} else if msg.SnapshotValid {
 			}
