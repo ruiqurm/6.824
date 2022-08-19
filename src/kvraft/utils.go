@@ -24,6 +24,7 @@ const (
 	SSET logTopic = "SSET" // server set
 	SGET logTopic = "SGET" // server get
 	SAPL logTopic = "SAPL" // server append
+	SSNA logTopic = "SSNA" // server snapshot
 	DEBG logTopic = "DEBUG"
 )
 

@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -42,6 +44,7 @@ type WaitingStruct struct {
 	Value         string
 	Verified_code int64
 	Client        int64
+	Term          int
 }
 type KVServer struct {
 	mu      sync.Mutex
@@ -55,21 +58,30 @@ type KVServer struct {
 	// Your definitions here.
 	data map[string]string
 	// commitIndex int32
-	waiting   map[int32]*WaitingStruct
-	check_map map[int64]int64
+	waiting    map[int32]*WaitingStruct
+	check_map  map[int64]int64
+	persister  *raft.Persister
+	leaderTerm int
+}
+type Pair struct {
+	Key, Value string
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	index, _, isLeader := kv.rf.Start(Op{ACTION_GET, args.Key, "", args.Sf, args.Client})
+	index, term, isLeader := kv.rf.Start(Op{ACTION_GET, args.Key, "", args.Sf, args.Client})
 	if !isLeader {
+		kv.leaderTerm = -1
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 		return
+	} else {
+		kv.leaderTerm = term
 	}
 	kv.Debug(SGET, "%v send getting [%v]", args.Client, args.Key)
 	ws := &WaitingStruct{
 		Committed: make(chan bool),
+		Term:      term,
 	}
 	kv.waiting[int32(index)] = ws
 	kv.mu.Unlock()
@@ -98,7 +110,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 		}
 		delete(kv.waiting, int32(i))
-		kv.Debug(DEBG, "delete channel %v", i)
+		kv.Debug(SGET, "delete channel %v", i)
 	}(index)
 }
 
@@ -130,19 +142,23 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	// call `Start` to commit a new Operation.
-	index, _, isLeader := kv.rf.Start(Op{action, args.Key, args.Value, args.Sf, args.Client})
+	index, term, isLeader := kv.rf.Start(Op{action, args.Key, args.Value, args.Sf, args.Client})
 
 	// if it is not a leader, set error type as ErrWrongLeader to ask client to find real leader.
 	if !isLeader {
+		kv.leaderTerm = -1
 		kv.mu.Unlock()
 		kv.Debug(SSET, "Start failed; not a leader")
 		reply.Err = ErrWrongLeader
 		return
+	} else {
+		kv.leaderTerm = term
 	}
 
 	// set check_map and get a waiting channel, which will notify the server when it has handled by applier
 	ws := &WaitingStruct{
 		Committed: make(chan bool),
+		Term:      term,
 	}
 	kv.waiting[int32(index)] = ws
 	kv.mu.Unlock()
@@ -154,10 +170,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		if ws.Client != args.Client || ws.Verified_code != args.Sf {
 			// commit failed(beacuse it's no longer leader)
 			reply.Err = ErrWrongLeader
-			kv.Debug(DEBG, "commit failed; client=%v,key=%v", client, args.Key)
+			kv.Debug(SSET, "commit failed; client=%v,key=%v", client, args.Key)
 		} else {
 			reply.Err = OK
-			kv.Debug(DEBG, "commit succ; client=%v,key=%v", client, args.Key)
+			kv.Debug(SSET, "commit succ; client=%v,key=%v", client, args.Key)
 		}
 	case <-time.After(time.Millisecond * 2000):
 		reply.Err = ErrTimeout
@@ -174,7 +190,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 		}
 		delete(kv.waiting, int32(i))
-		kv.Debug(DEBG, "delete channel %v", i)
+		kv.Debug(SSET, "delete channel %v", i)
 	}(index)
 }
 
@@ -193,19 +209,19 @@ func (kv *KVServer) applier() {
 				timestamp := op.Verified_code
 				stale := false
 				ret := ""
-
 				if op.Action == ACTION_APPEND || op.Action == ACTION_PUT {
 					// must exist
 					vc, ok := kv.check_map[client]
 					if ok && vc >= timestamp {
 						// stale
 						stale = true
-						kv.Debug(DEBG, "redundant commit;index=%v,client=%v,key=%v;check_map[%v]=%v,origin_ts=%v", msg.CommandIndex, client, op.Key, client, timestamp, vc)
+						kv.Debug(SAPL, "redundant commit;index=%v,client=%v,key=%v;check_map[%v]=%v,origin_ts=%v", msg.CommandIndex, client, op.Key, client, timestamp, vc)
 					} else {
-						kv.Debug(DEBG, "update check_map[%v]=%v", client, timestamp)
+						kv.Debug(SAPL, "update check_map[%v]=%v", client, timestamp)
 						kv.check_map[client] = timestamp
 					}
 				}
+
 				if !stale {
 					switch op.Action {
 					case ACTION_PUT:
@@ -224,32 +240,36 @@ func (kv *KVServer) applier() {
 							ret = v
 						}
 						// else ret is empty string
-						kv.Debug(SAPL, "ack msg get [%v]=%v", op.Key, ret)
+						kv.Debug(SAPL, "ack msg get [%v]", op.Key)
 					default:
 						panic("unknow action")
 					}
 				}
 				ws, ok := kv.waiting[int32(msg.CommandIndex)]
-				if ok {
+				if ok && kv.leaderTerm == ws.Term {
 					ws.Client = op.Client
 					ws.Value = ret
 					ws.Verified_code = op.Verified_code
 					close(ws.Committed)
 				}
+				kv.SnapshotL(msg.CommandIndex)
 				kv.mu.Unlock()
-				// if ok {
-				// 	close(ws.Committed)
-				// 	kv.Debug(SAPL, "index=%v DONE", msg.CommandIndex)
-				// }
-
 			} else if msg.SnapshotValid {
+				kv.mu.Lock()
+				data := bytes.NewBuffer(msg.Snapshot)
+				d := labgob.NewDecoder(data)
+				if d.Decode(&kv.data) != nil {
+					panic("readSnapshot error")
+				}
+				kv.mu.Unlock()
+				kv.Debug(SSNA, "ack snapshot on index=%v", kv.me)
 			}
 		case <-time.After(time.Millisecond * 2000): // avoid blocking
 			// timeout
 			// fmt.Printf("%v timeout!!!\n", kv.me)
 		}
 	}
-	kv.Debug(SAPL, "%v be killed", kv.me)
+
 }
 
 //
@@ -266,6 +286,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
+	kv.Debug(DEBG, "%v be killed", kv.me)
 }
 
 func (kv *KVServer) killed() bool {
@@ -297,14 +318,51 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	// You may need initialization code here.
+
+	// load data
 	kv.data = make(map[string]string)
+	if persister.SnapshotSize() != 0 {
+		// no snapshot data
+		data := bytes.NewBuffer(persister.ReadSnapshot())
+		d := labgob.NewDecoder(data)
+		if d.Decode(&kv.data) != nil {
+			panic("readSnapshot error")
+		}
+		fmt.Printf("server %v m[0]=%v\n", kv.me, kv.data["0"])
+		// var l []Pair
+		// if d.Decode(&l) != nil {
+		// 	panic("readSnapshot error")
+		// }
+		// for _, pair := range l {
+		// 	kv.data[pair.Key] = pair.Value
+		// }
+	}
+
 	// kv.clients = make(map[int16]int64)
 	kv.waiting = make(map[int32]*WaitingStruct)
 	kv.check_map = make(map[int64]int64)
+	kv.leaderTerm = -1
 	go kv.applier()
 	return kv
+}
+
+func (kv *KVServer) SnapshotL(index int) {
+	if kv.maxraftstate > 0 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+		kv.Debug(SSNA, "%v snapshot on index=%v", kv.me, index)
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(kv.data)
+		// var l []Pair
+		// for key, element := range kv.data {
+		// 	l = append(l, Pair{key, element})
+		// }
+		// e.Encode(l)
+
+		snapshot := w.Bytes()
+		kv.rf.Snapshot(index, snapshot)
+	}
 }
